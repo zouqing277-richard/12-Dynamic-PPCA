@@ -71,7 +71,9 @@ def load_checkpoint(path=CHECKPOINT_FILE):
         monitors["lstm_ae"] = lstm_mon
 
     print(f"Checkpoint loaded from '{path}'")
+    oracle_flag = ck.get("oracle", False)
     print(f"  Methods:  {list(monitors.keys())}")
+    print(f"  Oracle:   {oracle_flag}  (True = using true model parameters)")
     print(f"  Config:   p={ck['config']['P']}  q={ck['config']['Q']}"
           f"  N={ck['config']['N_TRAIN']}  n={ck['config']['N_WINDOW']}"
           f"  ARL0={ck['config']['ARL0']}")
@@ -99,7 +101,20 @@ def run_one_case(case, ic_model, monitors, ucls, shifts,
         row_arl = {"magnitude": d}
         row_se  = {"magnitude": d}
 
+        # ── Common Random Numbers (CRN) ─────────────────────────────────────
+        # Draw ONE seed from the master rng for this (case, d) combination.
+        # Every method resets to the same seed, so they all see the exact
+        # same B1 OC trajectories. This makes the ARL comparison a paired
+        # experiment and eliminates Monte Carlo variance in the difference
+        # ARL(method_A) - ARL(method_B).
+        #
+        # Monitoring itself (monitor_window) is deterministic given the data,
+        # so using the same OC data sequences is both necessary and sufficient
+        # for CRN to work correctly here.
+        crn_seed = int(rng.integers(0, 2**31))
+
         for name in method_names:
+            rng_method = np.random.default_rng(crn_seed)  # same seed → same OC data
             arl_mean, arl_se, _ = run_arl_experiment(
                 method_name = name,
                 monitor     = monitors[name],
@@ -110,7 +125,7 @@ def run_one_case(case, ic_model, monitors, ucls, shifts,
                 n_reps      = B1,
                 n_window    = n_window,
                 K_max       = K_max,
-                rng         = rng,
+                rng         = rng_method,
             )
             row_arl[name] = round(arl_mean, 2)
             row_se[name]  = round(arl_se,   3)

@@ -37,6 +37,23 @@ class StaticPPCA:
     # Phase I
     # ──────────────────────────────────────────────────────────────────────────
 
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Oracle constructor
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_true_model(cls, ic_model: dict) -> "StaticPPCA":
+        """
+        Build a StaticPPCA monitor from the TRUE IC model parameters.
+        """
+        m         = cls(q=len(ic_model["Lambda0"]))
+        m.nu0     = ic_model["nu0"].copy()
+        m.U       = ic_model["U0"].copy()
+        m.Ue      = ic_model["Ue"].copy()
+        m.Lambda0 = ic_model["Lambda0"].copy()
+        m.sigma0  = float(ic_model["sigma0"])
+        return m
     def fit(self, X: np.ndarray) -> "StaticPPCA":
         """
         Fit static PPCA from Phase I data.

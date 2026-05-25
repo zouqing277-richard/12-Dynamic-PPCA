@@ -48,7 +48,8 @@ def build_ic_model(p, q, sigma0, Lambda0, B0, seed=42):
     Ue = np.column_stack(Ue_cols)   # (p, p-q)
 
     return dict(nu0=np.zeros(p), U0=U0, Ue=Ue, A0=A0,
-                B0=B0, Psi0=Psi0, sigma0=sigma0, Lambda0=Lambda0)
+                B0=B0, Psi0=Psi0, sigma0=sigma0, Lambda0=Lambda0,
+                p=p, q=q)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -217,6 +218,100 @@ def generate_oc_case5(model, T, d, rng=None):
 # ─────────────────────────────────────────────────────────────────────────────
 # 统一调度接口
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Stateful simulation  (preserves latent state z across windows)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def simulate_ic_stateful(model, T, z_init, rng):
+    """
+    Simulate T IC observations starting from latent state z_init.
+
+    Unlike simulate_ic(), accepts the current latent state and returns the
+    final latent state so consecutive calls produce a truly continuous series.
+
+    Returns
+    -------
+    X       : (T, p)
+    z_final : (q,) latent state after last observation → pass to next call
+    """
+    A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
+    sigma0, nu0  = model["sigma0"], model["nu0"]
+    p, q = model["A0"].shape
+    L    = np.linalg.cholesky(Psi0)
+    X    = np.empty((T, p))
+    z    = z_init.copy()
+    for t in range(T):
+        z    = B0 @ z + L @ rng.standard_normal(q)
+        X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
+    return X, z
+
+
+def simulate_oc_stateful(model, T, case, d, z_init, rng):
+    """
+    Simulate T OC observations starting from latent state z_init.
+
+    Stateful version of generate_oc(): carries z_t forward so consecutive
+    windows form a truly continuous time series.
+
+    Returns
+    -------
+    X       : (T, p)
+    z_final : (q,)
+    """
+    A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
+    sigma0, nu0  = model["sigma0"], model["nu0"]
+    Ue           = model["Ue"]
+    p, q = model["A0"].shape
+    X    = np.empty((T, p))
+    z    = z_init.copy()
+
+    if case == "case1":
+        L     = np.linalg.cholesky(Psi0)
+        delta = np.zeros(q); delta[0] = d
+        for t in range(T):
+            z    = delta + B0 @ (z - delta) + L @ rng.standard_normal(q)
+            X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
+
+    elif case == "case2":
+        L           = np.linalg.cholesky(Psi0)
+        delta_tilde = d * Ue[:, 0]
+        for t in range(T):
+            z    = B0 @ z + L @ rng.standard_normal(q)
+            X[t] = nu0 + A0 @ z + np.sqrt(sigma0)*rng.standard_normal(p) + delta_tilde
+
+    elif case == "case3":
+        B1   = B0.copy(); B1[0, 1] += d
+        Psi1 = np.eye(q) - B1 @ B1.T
+        L1   = np.linalg.cholesky(Psi1)
+        for t in range(T):
+            z    = B1 @ z + L1 @ rng.standard_normal(q)
+            X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
+
+    elif case == "case4":
+        Delta_z = np.zeros((q, q)); Delta_z[0, 0] = d
+        Sigma_z = np.eye(q) + Delta_z
+        Psi1    = Sigma_z - B0 @ Sigma_z @ B0.T
+        L1      = np.linalg.cholesky(Psi1)
+        for t in range(T):
+            z    = B0 @ z + L1 @ rng.standard_normal(q)
+            X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
+
+    elif case == "case5":
+        L_z   = np.linalg.cholesky(Psi0)
+        u_e1  = Ue[:, 0]
+        Sig_e = sigma0 * np.eye(p) + d * sigma0 * np.outer(u_e1, u_e1)
+        L_e   = np.linalg.cholesky(Sig_e)
+        for t in range(T):
+            z    = B0 @ z + L_z @ rng.standard_normal(q)
+            X[t] = nu0 + A0 @ z + L_e @ rng.standard_normal(p)
+
+    else:
+        raise ValueError(f"Unknown case: {case}")
+
+    return X, z
+
 
 OC_GENERATORS = {
     "case1": generate_oc_case1,

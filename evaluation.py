@@ -121,17 +121,40 @@ def run_arl_experiment(method_name, monitor, ucls, model_ic,
     arl_se   : float   SE = std / √n_reps
     rls      : (n_reps,) 原始 run lengths（用于后续分析）
     """
-    from data_generator import generate_oc
+    from data_generator import simulate_ic_stateful, simulate_oc_stateful
     if rng is None:
         rng = np.random.default_rng()
 
-    T_oc = K_max * n_window + 1
-    rls  = np.empty(n_reps, dtype=np.float64)
+    WARMUP = 5 * n_window
+    rls    = np.empty(n_reps, dtype=np.float64)
+    alarm_fn = ALARM_RULES[case][method_name]
 
     for b in range(n_reps):
-        X_oc  = generate_oc(model_ic, T_oc, case, d, rng=rng)
-        rls[b] = _run_length(monitor, ucls, X_oc, n_window,
-                              case, method_name, K_max)
+        # ── Warm-up under IC then switch to OC ───────────────────────────────
+        # The process starts from z=0. We run WARMUP steps under IC so that
+        # the latent state z reaches approximate stationarity before the OC
+        # regime begins. Then we continue from that z using the OC dynamics.
+        # This produces a truly continuous time series across all windows.
+        q = model_ic["B0"].shape[0]
+        z = np.zeros(q)
+        X_warmup, z = simulate_ic_stateful(model_ic, WARMUP, z, rng)
+        x_lag       = X_warmup[-1:]     # lag observation for the first window
+
+        delay = K_max
+        for k in range(K_max):
+            # Generate n_window observations from the CURRENT z under OC
+            X_new, z = simulate_oc_stateful(model_ic, n_window, case, d, z, rng)
+
+            # Window = [lag | new]  shape (n_window+1, p)
+            X_win = np.vstack([x_lag, X_new])
+
+            row = monitor.monitor_window(X_win)
+            if alarm_fn(row, ucls):
+                delay = k + 1
+                break
+
+            x_lag = X_new[-1:]          # last obs becomes lag for next window
+        rls[b] = delay
 
     arl_mean = float(rls.mean())
     arl_se   = float(rls.std() / np.sqrt(n_reps))
@@ -148,28 +171,31 @@ def diagnostic_ratios(dyppca_monitor, ucls, model_ic, case, d,
     计算报警窗口时各分量比例 ρⱼ = tⱼ / (t₁+t₂+t₃+t₄)。
     返回均值字典 {"rho1":..., "rho2":..., "rho3":..., "rho4":...}。
     """
-    from data_generator import generate_oc
+    from data_generator import simulate_ic_stateful, simulate_oc_stateful
     if rng is None:
         rng = np.random.default_rng()
 
-    h     = ucls["t_total"]
-    T_oc  = K_max * n_window + 1
-    rhos  = []
+    h      = ucls["t_total"]
+    WARMUP = 5 * n_window
+    rhos   = []
+    q      = model_ic["B0"].shape[0]
 
     for _ in range(n_reps):
-        X_oc = generate_oc(model_ic, T_oc, case, d, rng=rng)
+        # Warm-up under IC, then slide OC windows with preserved latent state
+        z = np.zeros(q)
+        X_warmup, z = simulate_ic_stateful(model_ic, WARMUP, z, rng)
+        x_lag       = X_warmup[-1:]
+
         for k in range(K_max):
-            start = k * n_window
-            if start + n_window + 1 > X_oc.shape[0]:
-                break
-            row = dyppca_monitor.monitor_window(
-                X_oc[start : start + n_window + 1]
-            )
-            if row[4] > h:          # t_total > UCL
+            X_new, z = simulate_oc_stateful(model_ic, n_window, case, d, z, rng)
+            X_win    = np.vstack([x_lag, X_new])
+            row      = dyppca_monitor.monitor_window(X_win)
+            if row[4] > h:
                 total = row[4]
                 if total > 0:
                     rhos.append(np.array(row[:4]) / total)
                 break
+            x_lag = X_new[-1:]
 
     if not rhos:
         return {"rho1": np.nan, "rho2": np.nan,

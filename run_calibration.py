@@ -37,14 +37,37 @@ SUMMARY_FILE    = os.path.join(CHECKPOINT_DIR, "ucls_summary.txt")
 # Fit methods
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fit_all_methods(X_train, include_lstm=True):
-    monitors = {
-        "dyppca":       DyPPCA(q=config.Q).fit(X_train),
-        "dpca":         DPCA(cpv_threshold=config.DPCA_CPV,
-                             lag=config.DPCA_LAG).fit(X_train),
-        "static_ppca":  StaticPPCA(q=config.Q).fit(X_train),
-        "var_residual": VARResidual().fit(X_train),
-    }
+def fit_all_methods(X_train, include_lstm=True, oracle=False, ic_model=None):
+    """
+    Fit all methods on X_train.
+
+    Parameters
+    ----------
+    oracle   : if True, DyPPCA / StaticPPCA / VARResidual use true model
+               parameters instead of Phase I estimates.
+               DPCA and LSTM-AE always use Phase I data (no closed-form
+               true parameters available for these methods).
+    ic_model : required when oracle=True.
+    """
+    if oracle:
+        assert ic_model is not None, "oracle=True requires ic_model"
+        print("  [oracle] DyPPCA, StaticPPCA, VARResidual: using TRUE parameters")
+        print("  [oracle] DPCA: still using Phase I estimate (no true-param version)")
+        monitors = {
+            "dyppca":       DyPPCA.from_true_model(ic_model),
+            "dpca":         DPCA(cpv_threshold=config.DPCA_CPV,
+                                 lag=config.DPCA_LAG).fit(X_train),
+            "static_ppca":  StaticPPCA.from_true_model(ic_model),
+            "var_residual": VARResidual.from_true_model(ic_model),
+        }
+    else:
+        monitors = {
+            "dyppca":       DyPPCA(q=config.Q).fit(X_train),
+            "dpca":         DPCA(cpv_threshold=config.DPCA_CPV,
+                                 lag=config.DPCA_LAG).fit(X_train),
+            "static_ppca":  StaticPPCA(q=config.Q).fit(X_train),
+            "var_residual": VARResidual().fit(X_train),
+        }
     if include_lstm:
         from methods.lstm_ae import LSTMAEMonitor
         monitors["lstm_ae"] = LSTMAEMonitor(
@@ -64,7 +87,7 @@ def fit_all_methods(X_train, include_lstm=True):
 # Save / load helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_checkpoint(ic_model, monitors, ucls, seed, path=CHECKPOINT_FILE):
+def save_checkpoint(ic_model, monitors, ucls, seed, oracle=False, path=CHECKPOINT_FILE):
     """
     Save calibration results to a single pickle file.
 
@@ -90,6 +113,7 @@ def save_checkpoint(ic_model, monitors, ucls, seed, path=CHECKPOINT_FILE):
 
     checkpoint = {
         "ic_model":   ic_model,
+        "oracle":     oracle,
         "monitors":   {k: v for k, v in monitors.items() if k != "lstm_ae"},
         "lstm_state": lstm_state,
         "ucls":       ucls,
@@ -172,13 +196,12 @@ def verify_arl0(ic_model, monitors, ucls, n_window, K_max, rng, B_verify=1000):
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_calibration(include_lstm=True, fast=False, seed=config.SEED,
+def run_calibration(include_lstm=True, fast=False, seed=config.SEED, oracle=False,
                     verify=True):
 
     B_coarse  = 20   if fast else config.B_COARSE
     n_coarse  = 4    if fast else config.N_COARSE
-    B_fine    = 50   if fast else config.B_FINE
-    n_fine    = 3    if fast else config.N_FINE
+    B_fine    = 200   if fast else config.B_FINE
     B_boot    = 200  if fast else config.B_BOOTSTRAP
     K_max_run = 50   if fast else config.K_MAX
 
@@ -188,7 +211,7 @@ def run_calibration(include_lstm=True, fast=False, seed=config.SEED,
     print("DyPPCA UCL Calibration")
     print(f"  p={config.P}  q={config.Q}  N_TRAIN={config.N_TRAIN}")
     print(f"  ARL0={config.ARL0}  K_max={K_max_run}  tol={config.BISECT_TOL}")
-    print(f"  Coarse: {n_coarse}×{B_coarse}   Fine: {n_fine}×{B_fine}")
+    print(f"  Coarse: {n_coarse}×{B_coarse}   Fine: until |ARL₀-200|≤{config.BISECT_TOL} (B={B_fine}/step, max {config.MAX_FINE} steps)")
     print(f"  LSTM: {'yes' if include_lstm else 'no'}")
     print("=" * 60)
 
@@ -203,7 +226,8 @@ def run_calibration(include_lstm=True, fast=False, seed=config.SEED,
     # ── Step 3: Fit all methods ───────────────────────────────────────────
     print("Fitting all methods ...", flush=True)
     t0       = time.time()
-    monitors = fit_all_methods(X_train, include_lstm=include_lstm)
+    monitors = fit_all_methods(X_train, include_lstm=include_lstm,
+                                 oracle=oracle, ic_model=ic)
     print(f"  Done in {time.time()-t0:.1f}s", flush=True)
 
     # ── Step 4: Calibrate UCLs ────────────────────────────────────────────
@@ -216,11 +240,12 @@ def run_calibration(include_lstm=True, fast=False, seed=config.SEED,
         arl0        = config.ARL0,
         K_max       = K_max_run,
         rng         = rng,
+        fast        = fast,
         B_coarse    = B_coarse,
         n_coarse    = n_coarse,
         B_fine      = B_fine,
-        n_fine      = n_fine,
         bisect_tol  = config.BISECT_TOL,
+        max_fine    = config.MAX_FINE,
         B_bootstrap = B_boot,
         verbose     = True,
     )
@@ -234,7 +259,7 @@ def run_calibration(include_lstm=True, fast=False, seed=config.SEED,
                                    config.N_WINDOW, K_max_run, rng, B_v)
 
     # ── Step 6: Save checkpoint ───────────────────────────────────────────
-    save_checkpoint(ic, monitors, ucls, seed)
+    save_checkpoint(ic, monitors, ucls, seed, oracle=oracle)
     write_summary(ucls, arl_verified)
 
     print("\n✓ Calibration complete.")
@@ -250,6 +275,8 @@ if __name__ == "__main__":
                         help="Skip LSTM-AE")
     parser.add_argument("--fast",    action="store_true",
                         help="Debug mode (tiny B, fast but inaccurate)")
+    parser.add_argument("--oracle", action="store_true",
+                        help="Use TRUE model parameters (no Phase I estimation error)")
     parser.add_argument("--no-verify", action="store_true",
                         help="Skip ARL0 verification step")
     parser.add_argument("--seed",    type=int, default=config.SEED)
@@ -260,4 +287,5 @@ if __name__ == "__main__":
         fast         = args.fast,
         seed         = args.seed,
         verify       = not args.no_verify,
+        oracle       = args.oracle,
     )

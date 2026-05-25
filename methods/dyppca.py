@@ -104,6 +104,44 @@ class DyPPCA:
         self._precompute()
         return self
 
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Oracle constructor  (uses true parameters, no Phase I data needed)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_true_model(cls, ic_model: dict) -> "DyPPCA":
+        """
+        Build a DyPPCA monitor directly from the TRUE IC model parameters.
+
+        No Phase I data is needed. Use this to measure the theoretical
+        upper-bound performance of the monitoring statistic, removing
+        Phase I estimation error from the ARL comparison.
+
+        Parameters
+        ----------
+        ic_model : dict returned by data_generator.build_ic_model()
+        """
+        U0     = ic_model["U0"]       # (p, q)  true loading subspace
+        Ue     = ic_model["Ue"]       # (p, p-q)
+        A0     = ic_model["A0"]       # (p, q)
+        B0     = ic_model["B0"]       # (q, q)
+        sigma0 = ic_model["sigma0"]   # scalar
+        Lambda0= ic_model["Lambda0"]  # (q,)
+
+        # True Gamma0 = U0^T Cov(x_t, x_{t-1}) U0
+        #             = U0^T A0 B0 A0^T U0
+        Gamma0 = U0.T @ A0 @ B0 @ A0.T @ U0   # (q, q)
+
+        m          = cls(q=len(Lambda0))
+        m.nu0      = ic_model["nu0"].copy()
+        m.U        = U0.copy()
+        m.Ue       = Ue.copy()
+        m.Lambda0  = Lambda0.copy()
+        m.Gamma0   = Gamma0
+        m.sigma0   = float(sigma0)
+        m._precompute()
+        return m
     def _precompute(self):
         """Precompute Φ₀, Φ₀⁻¹, and derived blocks (eqs. 34–35)."""
         L0  = np.diag(self.Lambda0)        # (q, q)
