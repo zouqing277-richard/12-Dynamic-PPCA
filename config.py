@@ -13,7 +13,7 @@ B0 = np.array([[0.6, 0.1, 0.0],
                [0.1, 0.0, 0.4]])
 
 # Phase I
-N_TRAIN = 2000
+N_TRAIN = 5000
 
 # Phase II
 N_WINDOW = 50
