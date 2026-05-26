@@ -1,35 +1,30 @@
 """
-calibration.py  —  Two-phase Monte Carlo bisection for UCL calibration.
-Vectorised + parallel edition.
+calibration.py  —  CRN-based Monte Carlo calibration for UCLs.
 
-Key changes vs. the sequential version
-────────────────────────────────────────
-1. _estimate_arl_vectorized():
-   Simulates B IC sequences in parallel using simulate_ic_batch_stateful()
-   and evaluates statistics with monitor.monitor_window_batch().
-   Replaces the B-sequence Python for-loop with NumPy (B,q)/(B,p) ops.
+Common Random Numbers (CRN) design
+────────────────────────────────────
+For each method, B_crn IC trajectories are pre-generated ONCE, producing a
+statistics matrix  stats_mat[b, k, d]  (B × K_max_crn × n_stats).
 
-2. calibrate_all() uses joblib.Parallel to run independent UCL bisections
-   on separate CPU cores simultaneously.
+For any threshold h, ARL₀(h) is computed from the SAME pre-generated matrix:
+    RL_b(h) = first window k where stats_mat[b,k,si] > h  (or K_max_crn)
+    ARL₀(h) = mean(RL_b(h))
+
+Since stats_mat is fixed, ARL₀(h) is a non-decreasing step function of h,
+so bisection is always valid and gives consistent results across runs.
 
 Statistic registry
 ──────────────────
-  DyPPCA         : t1, t2, t3, t4, t_total   (5 UCLs, indices 0-4)
-  DPCA           : T2, Q                       (2 UCLs, indices 0-1)
-  Static PPCA    : T   (combined)              (1 UCL,  index  0)
-  VAR-residual   : T   (combined)              (1 UCL,  index  0)
-  LSTM-AE        : T2                          (1 UCL,  index  0)
+  DyPPCA         : t1(0), t2(1), t3(2), t4(3), t_total(4)
+  DPCA           : T2(0), Q(1)
+  Static PPCA    : T(0)
+  VAR-residual   : T(0)
+  LSTM-AE        : T2(0)
 """
 
 import os
 import numpy as np
 from joblib import Parallel, delayed
-from tqdm import tqdm
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Statistic registry
-# ─────────────────────────────────────────────────────────────────────────────
 
 CALIBRATION_STATS = {
     "dyppca":       {"t1":0, "t2":1, "t3":2, "t4":3, "t_total":4},
@@ -41,257 +36,305 @@ CALIBRATION_STATS = {
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers
+# CRN statistics matrix generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _stat_val(row, si: int) -> float:
-    if np.isscalar(row):
-        return float(row)
-    return float(row[si])
-
-
-def _bootstrap_stats(model_ic, monitor, n_window, B, rng):
-    """B independent IC windows → (B, d) statistics array."""
-    from data_generator import simulate_ic
-    X_p = simulate_ic(model_ic, n_window + 1, rng=rng)
-    out = monitor.monitor_window(X_p)
-    d   = 1 if np.isscalar(out) else len(out)
-    stats = np.empty((B, d))
-    for i in range(B):
-        X = simulate_ic(model_ic, n_window + 1, rng=rng)
-        r = monitor.monitor_window(X)
-        stats[i] = [r] if np.isscalar(r) else list(r)
-    return stats
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Vectorised ARL estimation  (replaces the sequential B-loop)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _estimate_arl_vectorized(model_ic, monitor, stat_idx, h,
-                              n_window, K_max, B, rng):
+def _generate_ic_stats_matrix(model_ic, monitor, n_window, K_max_crn, B_crn, rng,
+                               verbose=False):
     """
-    Estimate ARL0 by simulating B IC sequences in parallel.
+    Pre-generate statistics for B_crn IC sequences × K_max_crn windows.
 
-    Uses simulate_ic_batch_stateful() so all B latent states advance
-    together via (B,q) matrix ops, and monitor_window_batch() to
-    evaluate statistics for all active windows simultaneously.
+    All B_crn sequences are simulated simultaneously (batch).
+    Returns stats_mat : (B_crn, K_max_crn, d)  where d = n_stats of this monitor.
 
-    Returns
-    -------
-    float  estimated ARL0
+    This matrix is shared across ALL UCL bisections for this monitor,
+    ensuring CRN: ARL₀(h) is monotone non-decreasing in h for any fixed matrix.
     """
     from data_generator import simulate_ic_batch_stateful
 
     WARMUP = 5 * n_window
     q      = model_ic["B0"].shape[0]
-    p      = model_ic["A0"].shape[0]
 
-    # Initialise B latent states, run warmup
-    Z = np.zeros((B, q))
-    _, Z        = simulate_ic_batch_stateful(model_ic, WARMUP, Z, rng)
-    X_last, Z   = simulate_ic_batch_stateful(model_ic, 1,      Z, rng)
-    x_lag       = X_last                        # (B, 1, p)
+    # Warmup: drive B_crn sequences to stationarity
+    Z = np.zeros((B_crn, q))
+    _, Z      = simulate_ic_batch_stateful(model_ic, WARMUP, Z, rng)
+    X_last, Z = simulate_ic_batch_stateful(model_ic, 1, Z, rng)
+    x_lag     = X_last                             # (B, 1, p)
 
-    delays = np.full(B, K_max, dtype=np.float64)
-    active = np.ones(B, dtype=bool)             # which sequences are still running
+    # Determine output dimension from one test call
+    X_test, _ = simulate_ic_batch_stateful(model_ic, n_window,
+                                            Z[:2].copy(),
+                                            np.random.default_rng(0))
+    Xw_test = np.concatenate([x_lag[:2], X_test], axis=1)
+    d_stats = monitor.monitor_window_batch(Xw_test).shape[1]
 
-    for k in range(K_max):
-        n_active = int(active.sum())
-        if n_active == 0:
-            break
+    stats_mat = np.empty((B_crn, K_max_crn, d_stats))
 
-        # Simulate one window for all active sequences
-        Z_act  = Z[active]
-        xl_act = x_lag[active]                  # (n_active, 1, p)
-        X_new, Z_new = simulate_ic_batch_stateful(model_ic, n_window, Z_act, rng)
-        X_win  = np.concatenate([xl_act, X_new], axis=1)  # (n_active, n+1, p)
+    for k in range(K_max_crn):
+        X_new, Z = simulate_ic_batch_stateful(model_ic, n_window, Z, rng)
+        X_win    = np.concatenate([x_lag, X_new], axis=1)   # (B, n+1, p)
+        stats_mat[:, k, :] = monitor.monitor_window_batch(X_win)
+        x_lag = X_new[:, -1:, :]
 
-        # Batch statistics
-        stats_batch = monitor.monitor_window_batch(X_win)  # (n_active, d)
-        alarms = stats_batch[:, stat_idx] > h               # (n_active,)
+        if verbose and (k+1) % 200 == 0:
+            print(f"      {k+1}/{K_max_crn} windows ...", flush=True)
 
-        # Record run lengths
-        act_idx = np.where(active)[0]
-        delays[act_idx[alarms]] = k + 1
-        active[act_idx[alarms]] = False
-
-        # Carry forward non-alarmed states
-        still = ~alarms
-        Z[active]     = Z_new[still]
-        x_lag[active] = X_new[still, -1:, :]
-
-    return float(delays.mean())
+    return stats_mat   # (B_crn, K_max_crn, d_stats)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Two-phase bisection for one UCL
+# ARL computation from pre-generated stats (CRN guaranteed monotone)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _bisect_one_ucl(model_ic, monitor, stat_idx,
-                    h_lo, h_hi, target_arl, tol,
-                    n_window, K_max,
-                    B_coarse, n_coarse, B_fine,
-                    seed, name="", max_fine=60):
+def _arl_from_stats(stats_col, h):
     """
-    Two-phase bisection for a single (method, statistic) UCL.
-    Called in parallel by calibrate_all().
-    """
-    rng = np.random.default_rng(seed)
+    Compute ARL₀ from a pre-generated statistics column.
 
-    def arl_at(h, B):
-        return _estimate_arl_vectorized(model_ic, monitor, stat_idx, h,
-                                        n_window, K_max, B, rng)
+    Parameters
+    ----------
+    stats_col : (B, K_max) array — one statistic for B sequences × K_max windows
+    h         : threshold
+
+    Returns
+    -------
+    float  — estimated ARL₀(h), monotone non-decreasing in h for fixed stats_col
+    """
+    B, K_max = stats_col.shape
+    exceed   = stats_col > h              # (B, K_max) bool
+
+    has_alarm  = exceed.any(axis=1)       # (B,)
+    first_k    = np.argmax(exceed, axis=1)  # 0 if never (handled below)
+    run_lengths = np.where(has_alarm, first_k + 1, K_max)
+
+    censor_rate = float((~has_alarm).mean())
+    if censor_rate > 0.05:
+        import warnings
+        warnings.warn(
+            f"CRN ARL: censoring rate = {censor_rate:.3f} > 5%. "
+            f"Consider increasing K_max_crn.", RuntimeWarning, stacklevel=2)
+
+    return float(run_lengths.mean())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CRN bisection for one UCL
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _bisect_crn(stats_col, target_arl, tol, h_lo, h_hi,
+                n_coarse, max_fine, name=""):
+    """
+    Two-phase bisection using pre-generated stats_col (CRN).
+
+    Since ARL₀(h) is monotone in h for fixed stats_col, bisection is exact
+    (no Monte Carlo noise between evaluations at different h values).
+
+    Coarse phase: n_coarse binary steps (fast, same stats_col).
+    Fine phase  : continue until |ARL₀(h) - target| ≤ tol.
+    """
+    def arl_at(h):
+        return _arl_from_stats(stats_col, h)
 
     # Coarse phase
     for _ in range(n_coarse):
         h_mid = (h_lo + h_hi) / 2
-        arl   = arl_at(h_mid, B_coarse)
-        if arl > target_arl:
-            h_hi = h_mid
-        else:
-            h_lo = h_mid
+        arl   = arl_at(h_mid)
+        if arl > target_arl: h_hi = h_mid
+        else:                 h_lo = h_mid
 
     # Fine phase
     h_mid     = (h_lo + h_hi) / 2
     final_arl = None
     for step in range(max_fine):
-        arl       = arl_at(h_mid, B_fine)
+        arl       = arl_at(h_mid)
         final_arl = arl
         err       = abs(arl - target_arl)
-        print(f"  [{name}] Fine step {step+1:>2}: "
-              f"h={h_mid:.4f}  ARL0={arl:.2f}  |err|={err:.2f}"
+        print(f"  [{name}] step {step+1:>2}: "
+              f"h={h_mid:.4f}  ARL={arl:.2f}  |err|={err:.2f}"
               f"  {'✓' if err<=tol else ''}",
               flush=True)
         if err <= tol:
             break
-        h_hi = h_mid if arl > target_arl else h_hi
-        h_lo = h_mid if arl <= target_arl else h_lo
+        if arl > target_arl: h_hi = h_mid
+        else:                 h_lo = h_mid
         h_mid = (h_lo + h_hi) / 2
     else:
-        print(f"  WARNING [{name}]: max_fine reached, "
-              f"last ARL0={final_arl:.2f}", flush=True)
+        print(f"  WARNING [{name}]: max_fine={max_fine} reached, "
+              f"last ARL={final_arl:.2f}", flush=True)
 
     return h_mid, final_arl
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Fast mode
+# Main entry — CRN calibration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _calibrate_fast(model_ic, methods, n_window, arl0, rng, B_bootstrap):
-    alpha = 1.0 / arl0
-    ucls  = {}
-    for name, monitor in methods.items():
-        boot = _bootstrap_stats(model_ic, monitor, n_window, B_bootstrap, rng)
-        ucls[name] = {}
-        for stat_name, si in CALIBRATION_STATS[name].items():
-            ucls[name][stat_name] = float(np.quantile(boot[:, si], 1 - alpha))
-        print(f"  [fast] {name}: UCL (quantile only, NOT accurate)", flush=True)
-    return ucls
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Main entry — vectorised + parallel
-# ─────────────────────────────────────────────────────────────────────────────
-
-def calibrate_all(model_ic, methods, n_window, arl0, K_max, rng,
-                  B_coarse, n_coarse, B_fine,
-                  bisect_tol, B_bootstrap,
-                  max_fine=60, fast=False, verbose=True,
-                  n_jobs=-1):
+def calibrate_all(model_ic, methods, n_window, arl0, K_max_crn, rng,
+                  B_coarse=None,     # unused, kept for API compat
+                  n_coarse=20,
+                  B_fine=None,       # unused
+                  bisect_tol=2.0,
+                  B_bootstrap=None,  # unused
+                  max_fine=60,
+                  fast=False,
+                  verbose=True,
+                  n_jobs=-1,
+                  B_crn=5000):
     """
-    Calibrate UCLs for all methods via two-phase ARL bisection.
+    CRN-based UCL calibration.
 
-    Vectorised simulation (simulate_ic_batch_stateful + monitor_window_batch)
-    replaces the inner B-sequence Python loop.
-
-    joblib.Parallel runs independent UCL bisections concurrently.
+    For each method:
+      1. Pre-generate stats matrix (B_crn × K_max_crn × d) from IC trajectories.
+         All UCLs of the same method share this matrix (CRN across UCLs too).
+      2. Bisect each UCL using the monotone ARL₀(h) from the fixed matrix.
 
     Parameters
     ----------
-    n_jobs : int
-        Number of parallel jobs for joblib.  -1 = all available cores.
-        Set to 1 to disable parallelism (useful for debugging).
+    B_crn      : number of IC sequences per method (default 5000).
+                 CRN reduces Monte Carlo variance so fewer sequences suffice.
+    K_max_crn  : max windows per sequence (should be >> ARL₀; default ≈1500).
+    n_coarse   : binary search steps in coarse phase.
+    bisect_tol : fine phase stops when |ARL₀(h)−arl0| ≤ tol.
+    n_jobs     : joblib parallel jobs (methods run in parallel).
 
     Returns
     -------
-    ucls : dict  {method_name: {stat_name: h_star, ...}, ...}
+    ucls : dict  {method: {stat_name: h_star}}
     """
     if fast:
-        print("[fast mode] bootstrap quantile only (UCLs inaccurate)", flush=True)
-        return _calibrate_fast(model_ic, methods, n_window, arl0, rng, B_bootstrap)
+        return _calibrate_fast(model_ic, methods, n_window, arl0, rng, B_crn)
 
-    # ── Bootstrap initial intervals ──────────────────────────────────────────
     if verbose:
-        print("Bootstrapping initial intervals ...", flush=True)
+        print(f"CRN calibration: B_crn={B_crn}  K_max_crn={K_max_crn}  "
+              f"n_coarse={n_coarse}  tol={bisect_tol}", flush=True)
 
-    boot_cache = {}
-    for name, monitor in methods.items():
+    def _calibrate_one_method(name, monitor):
+        """Calibrate all UCLs for one method."""
         if name not in CALIBRATION_STATS:
-            continue
-        boot_cache[name] = _bootstrap_stats(
-            model_ic, monitor, n_window, B_bootstrap, rng)
+            return name, {}
 
-    # ── Build task list ───────────────────────────────────────────────────────
-    tasks = []
-    for name, monitor in methods.items():
-        if name not in CALIBRATION_STATS:
-            continue
-        boot = boot_cache[name]
-        for stat_name, si in CALIBRATION_STATS[name].items():
-            h_lo = float(np.quantile(boot[:, si], 0.980))
-            h_hi = float(np.quantile(boot[:, si], 0.9999))
-            seed  = int(rng.integers(0, 2**31))
-            tasks.append(dict(
-                name=name, monitor=monitor, stat_name=stat_name,
-                si=si, h_lo=h_lo, h_hi=h_hi, seed=seed,
-            ))
+        stats_map = CALIBRATION_STATS[name]
+        if verbose:
+            print(f"\n[{name}] generating IC stats matrix "
+                  f"({B_crn}×{K_max_crn}) ...", flush=True)
+
+        # Fresh RNG per method (seeded from parent)
+        method_rng = np.random.default_rng(rng.integers(0, 2**31))
+        stats_mat  = _generate_ic_stats_matrix(
+            model_ic, monitor, n_window, K_max_crn, B_crn, method_rng)
+        # stats_mat: (B_crn, K_max_crn, d_stats)
+
+        # Estimate bootstrap bounds from stats_mat marginals
+        ucls_method = {}
+        for stat_name, si in stats_map.items():
+            # For each sequence, take the max statistic value
+            # (conservative bound for quantile estimation)
+            flat = stats_mat[:, :, si].ravel()
+            h_lo = float(np.quantile(flat, 0.990))
+            h_hi = float(np.quantile(flat, 0.9999))
             if verbose:
                 print(f"  [{name}] {stat_name:8s}: "
-                      f"bootstrap interval [{h_lo:.4f}, {h_hi:.4f}]", flush=True)
+                      f"bootstrap [{h_lo:.4f}, {h_hi:.4f}]", flush=True)
 
+            h_star, arl_f = _bisect_crn(
+                stats_mat[:, :, si],
+                target_arl = arl0,
+                tol        = bisect_tol,
+                h_lo       = h_lo,
+                h_hi       = h_hi,
+                n_coarse   = n_coarse,
+                max_fine   = max_fine,
+                name       = f"{name}.{stat_name}",
+            )
+            ucls_method[stat_name] = h_star
+            if verbose:
+                arl_str = f"{arl_f:.1f}" if arl_f else "n/a"
+                print(f"  [{name}] {stat_name:8s}: "
+                      f"h*={h_star:.4f}  ARL={arl_str}", flush=True)
+
+        return name, ucls_method
+
+    # Parallel across methods
     if verbose:
-        n_cores = os.cpu_count() if n_jobs == -1 else max(1, n_jobs)
-        print(f"\nRunning {len(tasks)} UCL bisections "
-              f"(joblib n_jobs={n_jobs}, "
-              f"up to {min(len(tasks), n_cores)} parallel) ...\n", flush=True)
-
-    # ── Parallel bisection ────────────────────────────────────────────────────
-    def _run(task):
-        return _bisect_one_ucl(
-            model_ic   = model_ic,
-            monitor    = task["monitor"],
-            stat_idx   = task["si"],
-            h_lo       = task["h_lo"],
-            h_hi       = task["h_hi"],
-            target_arl = arl0,
-            tol        = bisect_tol,
-            n_window   = n_window,
-            K_max      = K_max,
-            B_coarse   = B_coarse,
-            n_coarse   = n_coarse,
-            B_fine     = B_fine,
-            seed       = task["seed"],
-            name       = f"{task['name']}.{task['stat_name']}",
-            max_fine   = max_fine,
-        )
+        ncores = os.cpu_count() if n_jobs == -1 else n_jobs
+        print(f"\nRunning {len(methods)} methods "
+              f"(n_jobs={n_jobs}, up to {min(len(methods),ncores)} parallel)\n",
+              flush=True)
 
     results = Parallel(n_jobs=n_jobs, backend="loky")(
-        delayed(_run)(t) for t in tasks
+        delayed(_calibrate_one_method)(name, mon)
+        for name, mon in methods.items()
     )
 
-    # ── Collect results ───────────────────────────────────────────────────────
-    ucls = {}
-    for task, (h_star, arl_final) in zip(tasks, results):
-        name      = task["name"]
-        stat_name = task["stat_name"]
-        if name not in ucls:
-            ucls[name] = {}
-        ucls[name][stat_name] = h_star
-        if verbose:
-            arl_str = f"{arl_final:.1f}" if arl_final is not None else "n/a"
-            print(f"  [{name}] {stat_name:8s}: h*={h_star:.4f}  ARL0={arl_str}",
-                  flush=True)
+    return {name: ucl_dict for name, ucl_dict in results}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fast mode (debug)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _calibrate_fast(model_ic, methods, n_window, arl0, rng, B_fast=500):
+    """Fast calibration: empirical quantile only (UCLs not accurate)."""
+    from data_generator import simulate_ic_batch_stateful
+
+    WARMUP, q = 5*n_window, model_ic["B0"].shape[0]
+    alpha = 1.0 / arl0
+    ucls  = {}
+
+    for name, monitor in methods.items():
+        if name not in CALIBRATION_STATS:
+            continue
+        Z = np.zeros((B_fast, q))
+        _, Z      = simulate_ic_batch_stateful(model_ic, WARMUP, Z, rng)
+        X_last, Z = simulate_ic_batch_stateful(model_ic, 1, Z, rng)
+        x_lag     = X_last
+        X_new, _  = simulate_ic_batch_stateful(model_ic, n_window, Z, rng)
+        X_win     = np.concatenate([x_lag, X_new], axis=1)
+        batch     = monitor.monitor_window_batch(X_win)   # (B, d)
+
+        ucls[name] = {}
+        for stat_name, si in CALIBRATION_STATS[name].items():
+            ucls[name][stat_name] = float(np.quantile(batch[:, si], 1-alpha))
+        print(f"  [fast] {name}: UCL (quantile only, NOT accurate)", flush=True)
 
     return ucls
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-calibration ARL₀ verification (CRN)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def verify_arl0_crn(model_ic, monitors, ucls, n_window, K_max_crn,
+                    B_verify, rng, verbose=True):
+    """
+    Verify calibrated UCLs using a fresh CRN stats matrix.
+    Reports ARL₀ estimate and censoring rate for each method's primary stat.
+    """
+    VERIFY_STAT = {
+        "dyppca":      "t_total",
+        "dpca":        "T2",
+        "static_ppca": "T",
+        "var_residual":"T",
+        "lstm_ae":     "T2",
+    }
+    if verbose:
+        print(f"\nARL₀ verification  (B_verify={B_verify})")
+
+    results = {}
+    for name, monitor in monitors.items():
+        stat_name = VERIFY_STAT.get(name, next(iter(CALIBRATION_STATS[name])))
+        si        = CALIBRATION_STATS[name][stat_name]
+        h         = ucls[name][stat_name]
+
+        method_rng = np.random.default_rng(rng.integers(0, 2**31))
+        stats_mat  = _generate_ic_stats_matrix(
+            model_ic, monitor, n_window, K_max_crn, B_verify, method_rng)
+        arl0_hat   = _arl_from_stats(stats_mat[:, :, si], h)
+        err        = abs(arl0_hat - 200) / 200 * 100
+        ok         = "✓" if err < 10 else "~"
+
+        if verbose:
+            print(f"  {name:<16} [{stat_name}]  "
+                  f"ARL₀={arl0_hat:6.1f}  err={err:.1f}%  {ok}")
+        results[name] = arl0_hat
+
+    return results

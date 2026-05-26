@@ -356,3 +356,84 @@ def simulate_ic_batch_stateful(model, T, Z_init, rng):
         Z      = Z @ B0.T + xi[t]
         X[:, t] = nu0 + Z @ A0.T + eps[t]
     return X, Z
+
+
+def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
+    """
+    Simulate T OC observations for B sequences in parallel.
+    Batch version of simulate_oc_stateful for CRN Phase II.
+
+    Parameters
+    ----------
+    model  : IC model dict
+    T      : time steps
+    case   : "case1"…"case5"
+    d      : shift magnitude
+    Z_init : (B, q) initial latent states
+    rng    : numpy Generator
+
+    Returns
+    -------
+    X       : (B, T, p)
+    Z_final : (B, q)
+    """
+    A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
+    sigma0, nu0  = model["sigma0"], model["nu0"]
+    Ue           = model["Ue"]
+    B_sz, q = Z_init.shape
+    p = A0.shape[0]
+    L = np.linalg.cholesky(Psi0)
+    X = np.empty((B_sz, T, p))
+    Z = Z_init.copy()
+
+    if case == "case1":
+        delta = np.zeros(q); delta[0] = d
+        xi  = rng.standard_normal((T, B_sz, q)) @ L.T
+        eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
+        for t in range(T):
+            Z      = delta + (Z - delta) @ B0.T + xi[t]
+            X[:,t] = nu0 + Z @ A0.T + eps[t]
+
+    elif case == "case2":
+        delta_tilde = d * Ue[:, 0]
+        xi  = rng.standard_normal((T, B_sz, q)) @ L.T
+        eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
+        for t in range(T):
+            Z      = Z @ B0.T + xi[t]
+            X[:,t] = nu0 + Z @ A0.T + eps[t] + delta_tilde
+
+    elif case == "case3":
+        B1   = B0.copy(); B1[0,1] += d
+        Psi1 = np.eye(q) - B1 @ B1.T
+        L1   = np.linalg.cholesky(Psi1)
+        xi   = rng.standard_normal((T, B_sz, q)) @ L1.T
+        eps  = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
+        for t in range(T):
+            Z      = Z @ B1.T + xi[t]
+            X[:,t] = nu0 + Z @ A0.T + eps[t]
+
+    elif case == "case4":
+        Delta_z = np.zeros((q,q)); Delta_z[0,0] = d
+        Sigma_z = np.eye(q) + Delta_z
+        Psi1    = Sigma_z - B0 @ Sigma_z @ B0.T
+        L1      = np.linalg.cholesky(Psi1)
+        xi  = rng.standard_normal((T, B_sz, q)) @ L1.T
+        eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
+        for t in range(T):
+            Z      = Z @ B0.T + xi[t]
+            X[:,t] = nu0 + Z @ A0.T + eps[t]
+
+    elif case == "case5":
+        u_e1       = Ue[:, 0]
+        sqrt_extra = np.sqrt(1.0 + d) - 1.0
+        xi  = rng.standard_normal((T, B_sz, q)) @ L.T
+        xi_p = rng.standard_normal((T, B_sz, p))
+        for t in range(T):
+            Z      = Z @ B0.T + xi[t]
+            eps    = np.sqrt(sigma0) * (xi_p[t] + sqrt_extra *
+                     (xi_p[t] @ u_e1)[:, None] * u_e1)
+            X[:,t] = nu0 + Z @ A0.T + eps
+    else:
+        raise ValueError(f"Unknown case: {case}")
+
+    return X, Z

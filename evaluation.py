@@ -1,271 +1,205 @@
 """
-evaluation.py
-ARL₁ estimation for all OC cases.
+evaluation.py — CRN-based ARL₁ estimation for Phase II.
 
-Statistic index registry
-────────────────────────
-  DyPPCA         : t1(0), t2(1), t3(2), t4(3), t_total(4)
-  DPCA           : T2(0), Q(1)
-  Static PPCA    : T(0)   — single combined statistic
-  VAR-residual   : T(0)   — single combined statistic
-  LSTM-AE        : T2(0)
+Common Random Numbers design for Phase II
+──────────────────────────────────────────
+For each (case, d), B OC sequences are pre-generated ONCE using
+simulate_oc_batch_stateful(), producing a statistics matrix for EVERY method.
+All methods' ARL₁ values are then computed from the same OC trajectories,
+ensuring fair comparison and reducing variance in method differences.
 
-Phase II comparison sets  (OC_COMPARISON_STATS)
-───────────────────────────────────────────────
-For every case we compare:
-  • DyPPCA: the theoretically sensitive component + t_total
-  • DPCA: T2 and Q  (both, since DPCA has no further decomposition)
-  • Static PPCA: T  (combined)
-  • VAR-residual: T  (combined)
-  • LSTM-AE: T2
-
-Alarm rule:  alarm  ⟺  stat[si] > h     (single threshold, no OR-combining)
+OC stats matrix structure:
+    oc_stats[method][b, k] = statistic for sequence b at window k
+All methods see the same B fault realisations.
 """
 
 import numpy as np
 from typing import Dict, List, Tuple
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Statistic index registry
-# ─────────────────────────────────────────────────────────────────────────────
-
+# ── Statistic index registry ──────────────────────────────────────────────────
 STAT_INDEX: Dict[str, Dict[str, int]] = {
-    "dyppca": {
-        "t1":      0,   # latent mean component
-        "t2":      1,   # residual mean component
-        "t3":      2,   # latent dynamics / covariance component
-        "t4":      3,   # obs noise covariance component
-        "t_total": 4,   # combined LRT  (t1+t2+t3+t4)
-    },
-    "dpca": {
-        "T2": 0,        # Hotelling T² on augmented scores
-        "Q":  1,        # SPE (squared prediction error)
-    },
-    "static_ppca": {
-        "T": 0,         # combined: T²+Q/σ₀+R1+R2  (scalar return)
-    },
-    "var_residual": {
-        "T": 0,         # combined: T²_resid+W_cov  (scalar return)
-    },
-    "lstm_ae": {
-        "T2": 0,        # reconstruction-residual Hotelling T²
-    },
+    "dyppca":       {"t1":0,"t2":1,"t3":2,"t4":3,"t_total":4},
+    "dpca":         {"T2":0,"Q":1},
+    "static_ppca":  {"T":0},
+    "var_residual": {"T":0},
+    "lstm_ae":      {"T2":0},
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# OC comparison sets
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Rationale per case (from Table 1 sensitivity analysis)
-# ───────────────────────────────────────────────────────
-# Case I   — latent mean shift  E(z_t)=d·e₁:
-#     t1 is the sensitive DyPPCA component.
-#
-# Case II  — obs noise mean shift  E(ε_t)=d·u_{e,1}:
-#     t2 is the sensitive DyPPCA component.
-#
-# Case III — latent AR matrix shift  B₁=B₀+d·E₁₂:
-#     t3 captures the lagged covariance change.
-#
-# Case IV  — latent covariance shift  Cov(z_t)=I+d·e₁e₁ᵀ:
-#     t3 captures the change in latent dynamics (B fixed, Σ_z changes).
-#
-# Case V   — obs noise covariance shift  Cov(ε_t)=σ₀I+d·σ₀·u u ᵀ:
-#     t4 is the sensitive DyPPCA component.
-#
-# In all cases DPCA contributes both T2 and Q (no further decomposition).
-# VAR-residual, Static PPCA, and LSTM-AE each contribute their single statistic.
-
+# ── Phase II comparison sets ──────────────────────────────────────────────────
 OC_COMPARISON_STATS: Dict[str, List[Tuple[str, str]]] = {
-    "case1": [
-        ("dyppca",       "t1"),
-        ("dyppca",       "t_total"),
-        ("dpca",         "T2"),
-        ("dpca",         "Q"),
-        ("static_ppca",  "T"),
-        ("var_residual", "T"),
-        ("lstm_ae",      "T2"),
-    ],
-    "case2": [
-        ("dyppca",       "t2"),
-        ("dyppca",       "t_total"),
-        ("dpca",         "T2"),
-        ("dpca",         "Q"),
-        ("static_ppca",  "T"),
-        ("var_residual", "T"),
-        ("lstm_ae",      "T2"),
-    ],
-    "case3": [
-        ("dyppca",       "t3"),
-        ("dyppca",       "t_total"),
-        ("dpca",         "T2"),
-        ("dpca",         "Q"),
-        ("static_ppca",  "T"),
-        ("var_residual", "T"),
-        ("lstm_ae",      "T2"),
-    ],
-    "case4": [
-        ("dyppca",       "t3"),
-        ("dyppca",       "t_total"),
-        ("dpca",         "T2"),
-        ("dpca",         "Q"),
-        ("static_ppca",  "T"),
-        ("var_residual", "T"),
-        ("lstm_ae",      "T2"),
-    ],
-    "case5": [
-        ("dyppca",       "t4"),
-        ("dyppca",       "t_total"),
-        ("dpca",         "T2"),
-        ("dpca",         "Q"),
-        ("static_ppca",  "T"),
-        ("var_residual", "T"),
-        ("lstm_ae",      "T2"),
-    ],
+    "case1": [("dyppca","t1"),("dyppca","t_total"),
+              ("dpca","T2"),("dpca","Q"),
+              ("static_ppca","T"),("var_residual","T"),("lstm_ae","T2")],
+    "case2": [("dyppca","t2"),("dyppca","t_total"),
+              ("dpca","T2"),("dpca","Q"),
+              ("static_ppca","T"),("var_residual","T"),("lstm_ae","T2")],
+    "case3": [("dyppca","t3"),("dyppca","t_total"),
+              ("dpca","T2"),("dpca","Q"),
+              ("static_ppca","T"),("var_residual","T"),("lstm_ae","T2")],
+    "case4": [("dyppca","t3"),("dyppca","t_total"),
+              ("dpca","T2"),("dpca","Q"),
+              ("static_ppca","T"),("var_residual","T"),("lstm_ae","T2")],
+    "case5": [("dyppca","t4"),("dyppca","t_total"),
+              ("dpca","T2"),("dpca","Q"),
+              ("static_ppca","T"),("var_residual","T"),("lstm_ae","T2")],
 }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal helper
+# CRN OC statistics matrix generation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _stat_val(row, si: int) -> float:
-    """Extract a scalar from monitor_window output (scalar or tuple/array)."""
-    if np.isscalar(row):
-        return float(row)
-    return float(row[si])
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# ARL₁ estimation
-# ─────────────────────────────────────────────────────────────────────────────
-
-def run_arl_experiment(base_method: str,
-                       stat_name: str,
-                       monitor,
-                       ucls: dict,
-                       model_ic: dict,
-                       case: str,
-                       d: float,
-                       n_reps: int,
-                       n_window: int,
-                       K_max: int = 2000,
-                       rng=None):
+def _generate_oc_stats(model_ic, monitors_needed, case, d,
+                        n_window, K_max_crn, B_crn, rng):
     """
-    Estimate ARL₁ for one (method, statistic) pair under OC case `case`.
+    Pre-generate OC statistics for B_crn sequences × K_max_crn windows,
+    for ALL required monitors simultaneously (CRN across methods).
 
     Parameters
     ----------
-    base_method : key in STAT_INDEX
-    stat_name   : key in STAT_INDEX[base_method]
-    monitor     : fitted monitor object
-    ucls        : ucls[base_method]  (dict {stat_name: h_star})
-    model_ic    : IC model dict from build_ic_model()
-    case        : "case1" … "case5"
-    d           : shift magnitude
-    n_reps      : OC replications
-    n_window    : monitoring window size
-    K_max       : censoring run length
-    rng         : numpy Generator
+    monitors_needed : dict {method_name: monitor_obj}
+                      only methods needed for this case
+    Returns
+    -------
+    oc_stats : dict {method_name: (B_crn, K_max_crn, d)}
+    """
+    from data_generator import (simulate_ic_batch_stateful,
+                                 simulate_oc_batch_stateful)
+
+    WARMUP = 5 * n_window
+    q      = model_ic["B0"].shape[0]
+
+    # Warmup under IC, then switch to OC
+    Z = np.zeros((B_crn, q))
+    _, Z      = simulate_ic_batch_stateful(model_ic, WARMUP, Z, rng)
+    X_last, Z = simulate_ic_batch_stateful(model_ic, 1, Z, rng)
+    x_lag     = X_last   # (B, 1, p)
+
+    # Pre-allocate output buffers
+    oc_stats = {}
+    for name, mon in monitors_needed.items():
+        X_test, _ = simulate_oc_batch_stateful(model_ic, n_window, case, d,
+                                                Z[:2].copy(),
+                                                np.random.default_rng(99))
+        Xw_test = np.concatenate([x_lag[:2], X_test], axis=1)
+        d_stats = mon.monitor_window_batch(Xw_test).shape[1]
+        oc_stats[name] = np.empty((B_crn, K_max_crn, d_stats))
+
+    # Generate K_max_crn windows for all B sequences simultaneously
+    for k in range(K_max_crn):
+        X_new, Z = simulate_oc_batch_stateful(model_ic, n_window, case, d, Z, rng)
+        X_win    = np.concatenate([x_lag, X_new], axis=1)   # (B, n+1, p)
+        for name, mon in monitors_needed.items():
+            oc_stats[name][:, k, :] = mon.monitor_window_batch(X_win)
+        x_lag = X_new[:, -1:, :]
+
+    return oc_stats
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ARL₁ from pre-generated OC stats (CRN)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _arl_from_stats(stats_col, h):
+    """
+    Compute ARL₁ from (B, K_max) stats column and threshold h.
+    Same logic as calibration: find first alarm window per sequence.
+    """
+    B, K_max   = stats_col.shape
+    exceed     = stats_col > h
+    has_alarm  = exceed.any(axis=1)
+    first_k    = np.argmax(exceed, axis=1)
+    run_lengths = np.where(has_alarm, first_k + 1, K_max)
+    arl_mean    = float(run_lengths.mean())
+    arl_se      = float(run_lengths.std() / np.sqrt(B))
+    return arl_mean, arl_se
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main Phase II ARL₁ experiment (CRN)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_arl_experiment_crn(case, d, monitors, ucls, model_ic,
+                            n_window, K_max_crn, B_crn, rng):
+    """
+    Compute ARL₁ for all relevant (method, statistic) pairs using CRN.
+
+    All methods see the SAME B_crn OC realisations, ensuring:
+    - Fair comparison (same fault paths)
+    - Reduced variance in ARL₁ differences between methods
 
     Returns
     -------
-    arl_mean : float
-    arl_se   : float  (std / √n_reps)
-    rls      : (n_reps,) raw run lengths
+    results : dict {f"{method}.{stat}": {"arl": float, "se": float}}
     """
-    from data_generator import simulate_ic_stateful, simulate_oc_stateful
+    pairs = [(m, s) for m, s in OC_COMPARISON_STATS[case]
+             if m in monitors]
 
-    if rng is None:
-        rng = np.random.default_rng()
+    # Only generate for methods actually needed
+    methods_needed = {m: monitors[m]
+                      for m in set(m for m, _ in pairs)
+                      if m in monitors}
 
-    si = STAT_INDEX[base_method][stat_name]
-    h  = ucls[stat_name]
+    oc_stats = _generate_oc_stats(
+        model_ic, methods_needed, case, d,
+        n_window, K_max_crn, B_crn, rng)
 
-    WARMUP = 5 * n_window
-    q      = model_ic["B0"].shape[0]
-    rls    = np.empty(n_reps, dtype=np.float64)
+    results = {}
+    for method, stat_name in pairs:
+        if method not in oc_stats:
+            continue
+        si  = STAT_INDEX[method][stat_name]
+        h   = ucls[method][stat_name]
+        col = oc_stats[method][:, :, si]          # (B, K_max)
+        arl, se = _arl_from_stats(col, h)
+        key = f"{method}.{stat_name}"
+        results[key] = {"arl": round(arl, 2), "se": round(se, 3)}
 
-    for b in range(n_reps):
-        z = np.zeros(q)
-        X_warmup, z = simulate_ic_stateful(model_ic, WARMUP, z, rng)
-        x_lag       = X_warmup[-1:]
-
-        delay = K_max
-        for k in range(K_max):
-            X_new, z = simulate_oc_stateful(model_ic, n_window, case, d, z, rng)
-            X_win    = np.vstack([x_lag, X_new])
-
-            row = monitor.monitor_window(X_win)
-            if _stat_val(row, si) > h:
-                delay = k + 1
-                break
-
-            x_lag = X_new[-1:]
-
-        rls[b] = delay
-
-    arl_mean = float(rls.mean())
-    arl_se   = float(rls.std() / np.sqrt(n_reps))
-    return arl_mean, arl_se, rls
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DyPPCA diagnostic component ratios
+# DyPPCA diagnostic component ratios (CRN)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def diagnostic_ratios(dyppca_monitor,
-                      ucls: dict,
-                      model_ic: dict,
-                      case: str,
-                      d: float,
-                      n_reps: int,
-                      n_window: int,
-                      K_max: int = 2000,
-                      rng=None) -> dict:
+def diagnostic_ratios_crn(dyppca_monitor, ucls, model_ic,
+                            case, d, n_window, K_max_crn, B_crn, rng):
     """
-    At the t_total alarm window, compute mean fraction contributed by each
-    component:  ρⱼ = tⱼ / (t₁+t₂+t₃+t₄).
-
-    Returns {"rho1": …, "rho2": …, "rho3": …, "rho4": …}.
+    At alarm windows, compute mean fraction of t_total from each component.
+    Uses CRN (same OC sequences as ARL computation if called with same rng).
     """
-    from data_generator import simulate_ic_stateful, simulate_oc_stateful
+    from data_generator import (simulate_ic_batch_stateful,
+                                 simulate_oc_batch_stateful)
 
-    if rng is None:
-        rng = np.random.default_rng()
-
-    h      = ucls["t_total"]
     WARMUP = 5 * n_window
     q      = model_ic["B0"].shape[0]
-    rhos   = []
+    h      = ucls["dyppca"]["t_total"]
 
-    for _ in range(n_reps):
-        z = np.zeros(q)
-        X_warmup, z = simulate_ic_stateful(model_ic, WARMUP, z, rng)
-        x_lag       = X_warmup[-1:]
+    Z = np.zeros((B_crn, q))
+    _, Z      = simulate_ic_batch_stateful(model_ic, WARMUP, Z, rng)
+    X_last, Z = simulate_ic_batch_stateful(model_ic, 1, Z, rng)
+    x_lag     = X_last
 
-        for k in range(K_max):
-            X_new, z = simulate_oc_stateful(model_ic, n_window, case, d, z, rng)
-            X_win    = np.vstack([x_lag, X_new])
-            row      = dyppca_monitor.monitor_window(X_win)
+    rho_sum  = np.zeros(4)
+    n_alarms = 0
 
-            if row[4] > h:           # t_total alarm
-                total = row[4]
-                if total > 0:
-                    rhos.append(np.array(row[:4]) / total)
-                break
+    for k in range(K_max_crn):
+        X_new, Z = simulate_oc_batch_stateful(model_ic, n_window, case, d, Z, rng)
+        X_win    = np.concatenate([x_lag, X_new], axis=1)
+        batch    = dyppca_monitor.monitor_window_batch(X_win)   # (B, 5)
+        x_lag    = X_new[:, -1:, :]
 
-            x_lag = X_new[-1:]
+        alarms   = batch[:, 4] > h     # t_total > h
+        if alarms.any():
+            t_alarm = batch[alarms, :4]      # (n_alarm, 4)
+            t_tot   = batch[alarms, 4:5]     # (n_alarm, 1)
+            rhos    = (t_alarm / t_tot).mean(0)
+            rho_sum += rhos * alarms.sum()
+            n_alarms += int(alarms.sum())
 
-    if not rhos:
-        return {"rho1": np.nan, "rho2": np.nan,
-                "rho3": np.nan, "rho4": np.nan}
+    if n_alarms == 0:
+        return {"rho1":np.nan,"rho2":np.nan,"rho3":np.nan,"rho4":np.nan}
 
-    rhos = np.array(rhos).mean(axis=0)
-    return {
-        "rho1": float(rhos[0]),
-        "rho2": float(rhos[1]),
-        "rho3": float(rhos[2]),
-        "rho4": float(rhos[3]),
-    }
+    rho_mean = rho_sum / n_alarms
+    return {"rho1":float(rho_mean[0]),"rho2":float(rho_mean[1]),
+            "rho3":float(rho_mean[2]),"rho4":float(rho_mean[3])}

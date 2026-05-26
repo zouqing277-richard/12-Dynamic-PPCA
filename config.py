@@ -75,12 +75,16 @@ K_MAX    = 2000
 # Calibration  (two-phase MC bisection on ARL₀)
 # ─────────────────────────────────────────────────────────────────────────────
 
-B_COARSE    = 300
-N_COARSE    = 15
-B_FINE      = 10_000    # SE(ARL₀) ≈ 200/√10000 = 2.0
+# ── CRN calibration parameters ──────────────────────────────────────────────
+B_CRN       = 5_000     # IC sequences per method (CRN reduces variance vs old B_FINE)
+K_MAX_CRN   = 1_500     # windows per sequence  (P(RL>1500) ≈ 0.1% → negligible censoring)
+N_COARSE    = 20        # binary search steps in coarse phase
 BISECT_TOL  = 2.0       # stop when |ARL₀(h) − 200| ≤ 2
-MAX_FINE    = 60
-B_BOOTSTRAP = 5000
+MAX_FINE    = 60        # safety cap
+# ── legacy keys kept for backwards compatibility ─────────────────────────────
+B_COARSE    = B_CRN
+B_FINE      = B_CRN
+B_BOOTSTRAP = B_CRN
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ARL₁ experiment
