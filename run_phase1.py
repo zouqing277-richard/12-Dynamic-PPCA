@@ -1,10 +1,13 @@
 """
 run_phase1.py
-Phase I estimation accuracy experiment.
+Phase I estimation accuracy experiment  (Figure 1 of the paper).
 
-Reproduces Figure 1 in the paper:
-    EU (subspace error), Eσ (noise variance error), EΣx (covariance error)
-    over N ∈ {500, 1000, 2000, 5000},  R=100 replications each.
+Tests whether Algorithm 1 can recover the true U₀, σ₀, and Σ_x from IC data
+for N ∈ {500, 1000, 2000, 5000},  R = 100 replications each.
+
+The true model parameters (A₀, B₀, Ψ₀, σ₀) are loaded from config.
+DyPPCA.fit() is used (NOT from_true_model), since the whole point is to
+evaluate Phase I estimation accuracy.
 """
 
 import numpy as np
@@ -23,24 +26,27 @@ def run_phase1(N_values=None, R=100, seed=config.SEED, save_dir="results/figures
     if N_values is None:
         N_values = [500, 1000, 2000, 5000]
 
-    # Build fixed IC model (U₀ is fixed across N for fair comparison)
+    # Fixed true IC model (parameters from the paper, equations 63–64)
     ic_model = build_ic_model(
-        config.P, config.Q, config.SIGMA0,
-        config.LAMBDA0, config.B0, seed=seed
+        p      = config.P,
+        q      = config.Q,
+        sigma0 = config.SIGMA0,
+        A0     = config.A0,
+        B0     = config.B0,
+        Psi0   = config.PSI0,
     )
-    U0 = ic_model["U0"]
-    A0 = ic_model["A0"]
+    U0     = ic_model["U0"]
+    A0     = ic_model["A0"]
     sigma0 = ic_model["sigma0"]
     Sigma_x_true = A0 @ A0.T + sigma0 * np.eye(config.P)
 
     results = {N: {"EU": [], "Esigma": [], "ESigmax": []} for N in N_values}
 
     for N in N_values:
-        print(f"  N = {N} ...")
+        print(f"  N = {N} ...", flush=True)
         for _ in range(R):
-            X = simulate_ic(ic_model, N + 1, rng=rng)
-            model = DyPPCA(q=config.Q)
-            model.fit(X)
+            X     = simulate_ic(ic_model, N + 1, rng=rng)
+            model = DyPPCA(q=config.Q).fit(X)
 
             # EU: subspace projection error  ‖ÛÛᵀ − U₀U₀ᵀ‖_F
             EU = np.linalg.norm(
@@ -61,9 +67,9 @@ def run_phase1(N_values=None, R=100, seed=config.SEED, save_dir="results/figures
 
     # ── Plot ──────────────────────────────────────────────────────────────────
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))
-    titles  = ["$E_U$ (subspace)", "$E_\\sigma$ (noise var.)", "$E_{\\Sigma_x}$ (covariance)"]
-    keys    = ["EU", "Esigma", "ESigmax"]
-    colors  = ["tab:blue", "tab:red", "tab:green"]
+    titles = ["$E_U$ (subspace)", "$E_\\sigma$ (noise var.)", "$E_{\\Sigma_x}$ (covariance)"]
+    keys   = ["EU", "Esigma", "ESigmax"]
+    colors = ["tab:blue", "tab:red", "tab:green"]
 
     for ax, title, key, color in zip(axes, titles, keys, colors):
         data = [results[N][key] for N in N_values]
@@ -76,24 +82,25 @@ def run_phase1(N_values=None, R=100, seed=config.SEED, save_dir="results/figures
         ax.set_xlabel("Phase I sample size $N$")
         ax.set_ylabel("Estimation error")
 
-    fig.suptitle("Distribution of Phase I Estimation Errors across "
-                 f"{R} Replications", fontsize=12)
+    fig.suptitle(f"Phase I Estimation Accuracy  "
+                 f"(p={config.P}, q={config.Q}, {R} replications)",
+                 fontsize=12)
     plt.tight_layout()
     fig.savefig(os.path.join(save_dir, "phase1_estimation.pdf"), dpi=150)
     fig.savefig(os.path.join(save_dir, "phase1_estimation.png"), dpi=150)
     plt.close(fig)
-    print(f"Saved Phase I figure to {save_dir}/")
+    print(f"Saved Phase I figure → {save_dir}/phase1_estimation.{{pdf,png}}")
 
     # ── Summary table ─────────────────────────────────────────────────────────
-    print("\n{'N':>6}  {'EU mean':>10}  {'EU std':>9}  "
-          "{'Eσ mean':>10}  {'Eσ std':>9}  "
-          "{'EΣ mean':>10}  {'EΣ std':>9}")
+    print(f"\n{'N':>6}  {'EU mean':>10}  {'EU std':>9}  "
+          f"{'Esigma mean':>12}  {'Esigma std':>11}  "
+          f"{'ESigmax mean':>13}  {'ESigmax std':>12}")
     for N in N_values:
         r = results[N]
         print(f"{N:>6}  "
               f"{np.mean(r['EU']):>10.4f}  {np.std(r['EU']):>9.4f}  "
-              f"{np.mean(r['Esigma']):>10.6f}  {np.std(r['Esigma']):>9.6f}  "
-              f"{np.mean(r['ESigmax']):>10.4f}  {np.std(r['ESigmax']):>9.4f}")
+              f"{np.mean(r['Esigma']):>12.6f}  {np.std(r['Esigma']):>11.6f}  "
+              f"{np.mean(r['ESigmax']):>13.4f}  {np.std(r['ESigmax']):>12.4f}")
 
     return results
 
@@ -101,5 +108,6 @@ def run_phase1(N_values=None, R=100, seed=config.SEED, save_dir="results/figures
 if __name__ == "__main__":
     print("=" * 60)
     print("Phase I estimation accuracy experiment")
+    print(f"  p={config.P}  q={config.Q}  sigma0={config.SIGMA0}")
     print("=" * 60)
     run_phase1()

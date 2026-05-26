@@ -3,25 +3,28 @@ run_calibration.py
 ──────────────────
 Step 1 of 2.  Run this ONCE to calibrate UCLs.
 
-What it does:
-  1. Build IC model  (U0 fixed by SEED)
-  2. Generate Phase I data  (N = N_TRAIN)
-  3. Fit all monitoring methods on Phase I data
-  4. Two-phase MC bisection to find UCL for each (method, statistic) pair:
-       DyPPCA      : t1, t2, t3, t4, t_total   (5 UCLs)
-       DPCA        : T2, Q                       (2 UCLs)
-       Static PPCA : T   (combined)              (1 UCL)
-       VAR-residual: T   (combined)              (1 UCL)
-       LSTM-AE     : T2                          (1 UCL)
-  5. Save everything to  results/calibration/checkpoint.pkl
+Fitting strategy
+────────────────
+  DyPPCA, StaticPPCA  : always use from_true_model() — the true IC parameters
+                         (A₀, B₀, Ψ₀, σ₀) are fixed and known from the paper.
+  DPCA                : Phase I estimates (no closed-form true-param version).
+  VARResidual         : Phase I estimates by default; --oracle-var for true model.
+  LSTM-AE             : Phase I training (always data-driven).
 
-After this script finishes, run:
-  python run_phase2.py
+UCL calibration
+───────────────
+  Every (method, statistic) pair gets its own MC bisection:
+    DyPPCA      → t1, t2, t3, t4, t_total   (5 UCLs)
+    DPCA        → T2, Q                       (2 UCLs)
+    StaticPPCA  → T  (combined)               (1 UCL)
+    VARResidual → T  (combined)               (1 UCL)
+    LSTM-AE     → T2                          (1 UCL)
 
 CLI:
-  python run_calibration.py               # all methods
+  python run_calibration.py               # standard run
   python run_calibration.py --no-lstm     # skip LSTM-AE
-  python run_calibration.py --fast        # debug mode (tiny B values)
+  python run_calibration.py --fast        # debug mode
+  python run_calibration.py --oracle-var  # VAR also uses from_true_model
 """
 
 import os, sys, time, argparse, pickle
@@ -41,35 +44,22 @@ SUMMARY_FILE    = os.path.join(CHECKPOINT_DIR, "ucls_summary.txt")
 # Fit methods
 # ─────────────────────────────────────────────────────────────────────────────
 
-def fit_all_methods(X_train, include_lstm=True, oracle=False, ic_model=None):
+def fit_all_methods(X_train, ic_model, include_lstm=True, oracle_var=False):
     """
-    Fit all methods on X_train.
+    Fit all monitoring methods.
 
-    Parameters
-    ----------
-    oracle   : if True, DyPPCA / StaticPPCA / VARResidual use true model
-               parameters instead of Phase I estimates.
-    ic_model : required when oracle=True.
+    DyPPCA and StaticPPCA always use from_true_model().
+    DPCA and LSTM-AE always use Phase I data.
+    VARResidual uses Phase I OLS by default; set oracle_var=True for true model.
     """
-    if oracle:
-        assert ic_model is not None, "oracle=True requires ic_model"
-        print("  [oracle] DyPPCA, StaticPPCA, VARResidual: using TRUE parameters")
-        print("  [oracle] DPCA: still using Phase I estimate")
-        monitors = {
-            "dyppca":       DyPPCA.from_true_model(ic_model),
-            "dpca":         DPCA(cpv_threshold=config.DPCA_CPV,
-                                 lag=config.DPCA_LAG).fit(X_train),
-            "static_ppca":  StaticPPCA.from_true_model(ic_model),
-            "var_residual": VARResidual.from_true_model(ic_model),
-        }
-    else:
-        monitors = {
-            "dyppca":       DyPPCA(q=config.Q).fit(X_train),
-            "dpca":         DPCA(cpv_threshold=config.DPCA_CPV,
-                                 lag=config.DPCA_LAG).fit(X_train),
-            "static_ppca":  StaticPPCA(q=config.Q).fit(X_train),
-            "var_residual": VARResidual().fit(X_train),
-        }
+    monitors = {
+        "dyppca":       DyPPCA.from_true_model(ic_model),
+        "static_ppca":  StaticPPCA.from_true_model(ic_model),
+        "dpca":         DPCA(cpv_threshold=config.DPCA_CPV,
+                             lag=config.DPCA_LAG).fit(X_train),
+        "var_residual": (VARResidual.from_true_model(ic_model) if oracle_var
+                         else VARResidual().fit(X_train)),
+    }
     if include_lstm:
         from methods.lstm_ae import LSTMAEMonitor
         monitors["lstm_ae"] = LSTMAEMonitor(
@@ -89,9 +79,9 @@ def fit_all_methods(X_train, include_lstm=True, oracle=False, ic_model=None):
 # Save / load helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def save_checkpoint(ic_model, monitors, ucls, seed, oracle=False, path=CHECKPOINT_FILE):
+def save_checkpoint(ic_model, monitors, ucls, seed, oracle_var=False,
+                    path=CHECKPOINT_FILE):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-
     lstm_state = None
     if "lstm_ae" in monitors:
         import torch
@@ -105,10 +95,9 @@ def save_checkpoint(ic_model, monitors, ucls, seed, oracle=False, path=CHECKPOIN
             "mu_r":       monitors["lstm_ae"].mu_r,
             "Sig_r_inv":  monitors["lstm_ae"].Sig_r_inv,
         }
-
     checkpoint = {
         "ic_model":   ic_model,
-        "oracle":     oracle,
+        "oracle_var": oracle_var,
         "monitors":   {k: v for k, v in monitors.items() if k != "lstm_ae"},
         "lstm_state": lstm_state,
         "ucls":       ucls,
@@ -118,7 +107,7 @@ def save_checkpoint(ic_model, monitors, ucls, seed, oracle=False, path=CHECKPOIN
             "N_TRAIN": config.N_TRAIN, "N_WINDOW": config.N_WINDOW,
             "ARL0": config.ARL0, "K_MAX": config.K_MAX,
             "BISECT_TOL": config.BISECT_TOL,
-        }
+        },
     }
     with open(path, "wb") as f:
         pickle.dump(checkpoint, f)
@@ -134,11 +123,8 @@ def write_summary(ucls, arl_verified, path=SUMMARY_FILE):
     ]
     for method, ucl_dict in ucls.items():
         lines.append(f"\n[{method}]")
-        if isinstance(ucl_dict, dict):
-            for k, v in ucl_dict.items():
-                lines.append(f"  {k:12s} = {v:.4f}")
-        else:
-            lines.append(f"  UCL = {ucl_dict:.4f}")
+        for k, v in ucl_dict.items():
+            lines.append(f"  {k:12s} = {v:.4f}")
         if method in arl_verified:
             lines.append(f"  Verified ARL0 ≈ {arl_verified[method]:.1f}")
     with open(path, "w") as f:
@@ -150,39 +136,29 @@ def write_summary(ucls, arl_verified, path=SUMMARY_FILE):
 # Quick ARL0 verification after calibration
 # ─────────────────────────────────────────────────────────────────────────────
 
-def verify_arl0(ic_model, monitors, ucls, n_window, K_max, rng, B_verify=1000):
-    """
-    Quick check: confirm ARL0 ≈ 200 for the primary statistic of each method.
+_VERIFY_STAT = {
+    "dyppca":       "t_total",
+    "dpca":         "T2",
+    "static_ppca":  "T",
+    "var_residual": "T",
+    "lstm_ae":      "T2",
+}
 
-    Primary statistics used for verification:
-        DyPPCA       → t_total   (overall combined)
-        DPCA         → T2
-        Static PPCA  → T         (combined)
-        VAR-residual → T         (combined)
-        LSTM-AE      → T2
-    """
+
+def verify_arl0(ic_model, monitors, ucls, n_window, K_max, rng, B_verify=1000):
     from data_generator import simulate_ic_stateful
     from evaluation import STAT_INDEX
-
-    # Primary statistic used for IC verification per method
-    VERIFY_STAT = {
-        "dyppca":       "t_total",
-        "dpca":         "T2",
-        "static_ppca":  "T",
-        "var_residual": "T",
-        "lstm_ae":      "T2",
-    }
 
     print(f"\nVerifying ARL0 (B_verify={B_verify}) ...")
     results = {}
     WARMUP  = 5 * n_window
 
     for name, monitor in monitors.items():
-        stat_name = VERIFY_STAT.get(name, next(iter(STAT_INDEX[name])))
+        stat_name = _VERIFY_STAT.get(name, next(iter(STAT_INDEX[name])))
         si        = STAT_INDEX[name][stat_name]
         h         = ucls[name][stat_name]
+        delays    = []
 
-        delays = []
         for _ in range(B_verify):
             q = ic_model["B0"].shape[0]
             z = np.zeros(q)
@@ -214,8 +190,8 @@ def verify_arl0(ic_model, monitors, ucls, n_window, K_max, rng, B_verify=1000):
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_calibration(include_lstm=True, fast=False, seed=config.SEED, oracle=False,
-                    verify=True):
+def run_calibration(include_lstm=True, fast=False, seed=config.SEED,
+                    oracle_var=False, verify=True):
 
     B_coarse  = 20    if fast else config.B_COARSE
     n_coarse  = 4     if fast else config.N_COARSE
@@ -227,30 +203,40 @@ def run_calibration(include_lstm=True, fast=False, seed=config.SEED, oracle=Fals
 
     print("=" * 60)
     print("DyPPCA UCL Calibration")
-    print(f"  p={config.P}  q={config.Q}  N_TRAIN={config.N_TRAIN}")
+    print(f"  p={config.P}  q={config.Q}  sigma0={config.SIGMA0}")
+    print(f"  N_TRAIN={config.N_TRAIN}  n={config.N_WINDOW}")
     print(f"  ARL0={config.ARL0}  K_max={K_max_run}  tol={config.BISECT_TOL}")
-    print(f"  Coarse: {n_coarse}×{B_coarse}   Fine: until |ARL₀-200|≤{config.BISECT_TOL} "
+    print(f"  Coarse: {n_coarse}x{B_coarse}  "
+          f"Fine: until |ARL0-200|<={config.BISECT_TOL} "
           f"(B={B_fine}/step, max {config.MAX_FINE} steps)")
-    print(f"  LSTM: {'yes' if include_lstm else 'no'}")
+    print(f"  DyPPCA+StaticPPCA: from_true_model  |  "
+          f"DPCA+VAR+LSTM: Phase I")
     print("=" * 60)
 
-    # ── Step 1: IC model ──────────────────────────────────────────────────
-    ic = build_ic_model(config.P, config.Q, config.SIGMA0,
-                        config.LAMBDA0, config.B0, seed=seed)
+    # ── Step 1: IC model ───────────────────────────────────────────────────
+    ic = build_ic_model(
+        p      = config.P,
+        q      = config.Q,
+        sigma0 = config.SIGMA0,
+        A0     = config.A0,
+        B0     = config.B0,
+        Psi0   = config.PSI0,
+    )
 
-    # ── Step 2: Phase I data (ONE dataset, fixed across all experiments) ──
+    # ── Step 2: Phase I data ───────────────────────────────────────────────
     print(f"\nGenerating Phase I data (N={config.N_TRAIN}) ...", flush=True)
     X_train = simulate_ic(ic, config.N_TRAIN + 1, rng=rng)
 
-    # ── Step 3: Fit all methods ───────────────────────────────────────────
-    print("Fitting all methods ...", flush=True)
+    # ── Step 3: Fit all methods ────────────────────────────────────────────
+    print("Fitting monitors ...", flush=True)
     t0       = time.time()
-    monitors = fit_all_methods(X_train, include_lstm=include_lstm,
-                               oracle=oracle, ic_model=ic)
+    monitors = fit_all_methods(X_train, ic,
+                               include_lstm=include_lstm,
+                               oracle_var=oracle_var)
     print(f"  Done in {time.time()-t0:.1f}s", flush=True)
 
-    # ── Step 4: Calibrate UCLs ────────────────────────────────────────────
-    print("\nCalibrating UCLs (two-phase MC bisection) ...", flush=True)
+    # ── Step 4: Calibrate UCLs ─────────────────────────────────────────────
+    print("\nCalibrating UCLs ...", flush=True)
     t0   = time.time()
     ucls = calibrate_all(
         model_ic    = ic,
@@ -270,40 +256,35 @@ def run_calibration(include_lstm=True, fast=False, seed=config.SEED, oracle=Fals
     )
     print(f"\nCalibration done in {(time.time()-t0)/60:.1f} min", flush=True)
 
-    # ── Step 5: Verify ARL0 ───────────────────────────────────────────────
+    # ── Step 5: Verify ARL0 ────────────────────────────────────────────────
     arl_verified = {}
     if verify:
         B_v = 200 if fast else 1000
         arl_verified = verify_arl0(ic, monitors, ucls,
                                    config.N_WINDOW, K_max_run, rng, B_v)
 
-    # ── Step 6: Save checkpoint ───────────────────────────────────────────
-    save_checkpoint(ic, monitors, ucls, seed, oracle=oracle)
+    # ── Step 6: Save ───────────────────────────────────────────────────────
+    save_checkpoint(ic, monitors, ucls, seed, oracle_var=oracle_var)
     write_summary(ucls, arl_verified)
 
-    print("\n✓ Calibration complete.")
-    print(f"  Next step:  python run_phase2.py")
+    print("\nCalibration complete. Next step: python run_phase2.py")
     return ic, monitors, ucls
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Calibrate UCLs and save checkpoint"
-    )
-    parser.add_argument("--no-lstm",   action="store_true", help="Skip LSTM-AE")
-    parser.add_argument("--fast",      action="store_true",
-                        help="Debug mode (tiny B, fast but inaccurate)")
-    parser.add_argument("--oracle",    action="store_true",
-                        help="Use TRUE model parameters (no Phase I estimation error)")
-    parser.add_argument("--no-verify", action="store_true",
-                        help="Skip ARL0 verification step")
-    parser.add_argument("--seed",      type=int, default=config.SEED)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--no-lstm",    action="store_true")
+    parser.add_argument("--fast",       action="store_true")
+    parser.add_argument("--oracle-var", action="store_true",
+                        help="Use from_true_model for VARResidual too")
+    parser.add_argument("--no-verify",  action="store_true")
+    parser.add_argument("--seed",       type=int, default=config.SEED)
     args = parser.parse_args()
 
     run_calibration(
         include_lstm = not args.no_lstm,
         fast         = args.fast,
         seed         = args.seed,
+        oracle_var   = args.oracle_var,
         verify       = not args.no_verify,
-        oracle       = args.oracle,
     )
