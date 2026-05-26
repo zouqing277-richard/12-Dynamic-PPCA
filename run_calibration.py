@@ -160,34 +160,55 @@ def verify_arl0(ic_model, monitors, ucls, n_window, K_max, rng, B_verify=1000):
     """
     Quick check: generate B_verify IC replications and confirm ARL0 ≈ 200.
     Returns dict {method_name: estimated_arl0}.
+    
+    Uses t_total for dyppca, T2 for dpca/var_residual/lstm_ae,
+    W for static_ppca — all via the new single-threshold alarm.
     """
-    from data_generator import simulate_ic
-    from evaluation     import ALARM_RULES
+    from data_generator import simulate_ic_stateful
+    from evaluation import STAT_INDEX
+
+    # 每个方法用哪个统计量做 IC 验证（选最综合的那个）
+    VERIFY_STAT = {
+        "dyppca":       "t_total",
+        "dpca":         "T2",
+        "static_ppca":  "W",
+        "var_residual": "T2",
+        "lstm_ae":      "T2",
+    }
 
     print(f"\nVerifying ARL0 (B_verify={B_verify}) ...")
     results = {}
+    WARMUP  = 5 * n_window
+
     for name, monitor in monitors.items():
-        alarm_fn = ALARM_RULES["case1"][name]
-        delays   = []
-        WARMUP   = 5 * n_window
+        stat_name = VERIFY_STAT.get(name, next(iter(STAT_INDEX[name])))
+        si        = STAT_INDEX[name][stat_name]
+        h         = ucls[name][stat_name]
+
+        delays = []
         for _ in range(B_verify):
-            X_buf = simulate_ic(ic_model, WARMUP + n_window + 1, rng=rng)
+            q = ic_model["B0"].shape[0]
+            z = np.zeros(q)
+            X_warmup, z = simulate_ic_stateful(ic_model, WARMUP, z, rng)
+            x_lag       = X_warmup[-1:]
+
             delay = K_max
             for k in range(K_max):
-                X_win = X_buf[WARMUP:] if k == 0 else \
-                        np.vstack([X_buf[-1:],
-                                   simulate_ic(ic_model, n_window + 1, rng=rng)[1:]])
-                if k > 0:
-                    X_buf = X_win
-                row = monitor.monitor_window(X_win)
-                if alarm_fn(row, ucls[name]):
+                X_new, z  = simulate_ic_stateful(ic_model, n_window, z, rng)
+                X_win     = np.vstack([x_lag, X_new])
+                row       = monitor.monitor_window(X_win)
+                val       = float(row) if np.isscalar(row) else float(row[si])
+                if val > h:
                     delay = k + 1
                     break
+                x_lag = X_new[-1:]
             delays.append(delay)
+
         arl0_hat = float(np.mean(delays))
         err      = abs(arl0_hat - config.ARL0) / config.ARL0 * 100
         ok       = "✓" if err < 15 else "~"
-        print(f"  {name:<16}  ARL0 = {arl0_hat:6.1f}  (err={err:.1f}%)  {ok}")
+        print(f"  {name:<16}  [{stat_name}]  ARL0 = {arl0_hat:6.1f}"
+              f"  (err={err:.1f}%)  {ok}")
         results[name] = arl0_hat
     return results
 

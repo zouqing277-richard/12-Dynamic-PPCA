@@ -1,10 +1,16 @@
 """
 run_phase2.py
 ─────────────
-Step 2 of 2.  Load calibration checkpoint and run ARL1 experiments.
+Step 2 of 2.  Load calibration checkpoint and run ARL₁ experiments.
 
 Requires:  results/calibration/checkpoint.pkl
            (produced by run_calibration.py)
+
+For each OC case the comparison set is defined in evaluation.OC_COMPARISON_STATS:
+only the (method, statistic) pairs that are theoretically relevant to that case
+are evaluated, keeping computation focused and results interpretable.
+
+CSV output columns are named  "<method>.<stat>"  (e.g. "dyppca.t1", "dpca.T2").
 
 CLI:
   python run_phase2.py                        # all 5 cases
@@ -18,8 +24,7 @@ import numpy as np
 import pandas as pd
 
 import config
-from data_generator import simulate_ic
-from evaluation     import run_arl_experiment, diagnostic_ratios
+from evaluation import run_arl_experiment, diagnostic_ratios, OC_COMPARISON_STATS
 
 CHECKPOINT_FILE = "results/calibration/checkpoint.pkl"
 
@@ -29,10 +34,7 @@ CHECKPOINT_FILE = "results/calibration/checkpoint.pkl"
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_checkpoint(path=CHECKPOINT_FILE):
-    """
-    Load ic_model, monitors, and ucls from the saved checkpoint.
-    Reconstructs the LSTM-AE monitor from its saved state_dict if present.
-    """
+    """Load ic_model, monitors, and ucls; reconstruct LSTM-AE if saved."""
     if not os.path.exists(path):
         print(f"ERROR: Checkpoint not found at '{path}'")
         print("       Run  python run_calibration.py  first.")
@@ -42,22 +44,20 @@ def load_checkpoint(path=CHECKPOINT_FILE):
         ck = pickle.load(f)
 
     ic_model = ck["ic_model"]
-    monitors = ck["monitors"]   # all methods except lstm_ae
+    monitors = ck["monitors"]
     ucls     = ck["ucls"]
 
-    # Rebuild LSTM-AE monitor from saved state if it was included
     if ck.get("lstm_state") is not None:
         st = ck["lstm_state"]
         from methods.lstm_ae import LSTMAEMonitor, LSTMAutoencoder
         import torch
 
         lstm_mon = LSTMAEMonitor(
-            input_dim   = st["input_dim"],
-            hidden_dim  = st["hidden_dim"],
-            latent_dim  = st["latent_dim"],
-            num_layers  = st["num_layers"],
+            input_dim  = st["input_dim"],
+            hidden_dim = st["hidden_dim"],
+            latent_dim = st["latent_dim"],
+            num_layers = st["num_layers"],
         )
-        # Rebuild model and load weights
         model = LSTMAutoencoder(st["input_dim"], st["hidden_dim"],
                                 st["latent_dim"], st["num_layers"])
         state_dict = {k: torch.from_numpy(v)
@@ -65,16 +65,16 @@ def load_checkpoint(path=CHECKPOINT_FILE):
         model.load_state_dict(state_dict)
         model.eval()
 
-        lstm_mon.model      = model
-        lstm_mon.mu_r       = st["mu_r"]
-        lstm_mon.Sig_r_inv  = st["Sig_r_inv"]
+        lstm_mon.model     = model
+        lstm_mon.mu_r      = st["mu_r"]
+        lstm_mon.Sig_r_inv = st["Sig_r_inv"]
         monitors["lstm_ae"] = lstm_mon
 
-    print(f"Checkpoint loaded from '{path}'")
     oracle_flag = ck.get("oracle", False)
-    print(f"  Methods:  {list(monitors.keys())}")
-    print(f"  Oracle:   {oracle_flag}  (True = using true model parameters)")
-    print(f"  Config:   p={ck['config']['P']}  q={ck['config']['Q']}"
+    print(f"Checkpoint loaded from '{path}'")
+    print(f"  Methods : {list(monitors.keys())}")
+    print(f"  Oracle  : {oracle_flag}")
+    print(f"  Config  : p={ck['config']['P']}  q={ck['config']['Q']}"
           f"  N={ck['config']['N_TRAIN']}  n={ck['config']['N_WINDOW']}"
           f"  ARL0={ck['config']['ARL0']}")
     return ic_model, monitors, ucls
@@ -86,13 +86,26 @@ def load_checkpoint(path=CHECKPOINT_FILE):
 
 def run_one_case(case, ic_model, monitors, ucls, shifts,
                  B1, n_window, K_max, rng, save_dir):
-    os.makedirs(save_dir, exist_ok=True)
-    method_names = list(monitors.keys())
-    rows_arl, rows_se, rows_diag = [], [], []
+    """
+    Evaluate ARL₁ for all (method, statistic) pairs in OC_COMPARISON_STATS[case].
 
-    print(f"\n{chr(8212)*60}")
+    CSV columns: "<method>.<stat>"  e.g. "dyppca.t1", "dpca.T2".
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Only run pairs whose method is present in monitors
+    pairs = [
+        (m, s) for m, s in OC_COMPARISON_STATS[case]
+        if m in monitors
+    ]
+    col_names = [f"{m}.{s}" for m, s in pairs]
+
+    print(f"\n{'─'*60}")
     print(f"  {case.upper()}  |  shifts={shifts}  B1={B1}")
-    print(f"{chr(8212)*60}")
+    print(f"  Comparing: {col_names}")
+    print(f"{'─'*60}")
+
+    rows_arl, rows_se, rows_diag = [], [], []
 
     for d in shifts:
         t0 = time.time()
@@ -101,66 +114,66 @@ def run_one_case(case, ic_model, monitors, ucls, shifts,
         row_arl = {"magnitude": d}
         row_se  = {"magnitude": d}
 
-        # ── Common Random Numbers (CRN) ─────────────────────────────────────
-        # Draw ONE seed from the master rng for this (case, d) combination.
-        # Every method resets to the same seed, so they all see the exact
-        # same B1 OC trajectories. This makes the ARL comparison a paired
-        # experiment and eliminates Monte Carlo variance in the difference
-        # ARL(method_A) - ARL(method_B).
-        #
-        # Monitoring itself (monitor_window) is deterministic given the data,
-        # so using the same OC data sequences is both necessary and sufficient
-        # for CRN to work correctly here.
+        # Common Random Numbers: all pairs see the same OC trajectories
         crn_seed = int(rng.integers(0, 2**31))
 
-        for name in method_names:
-            rng_method = np.random.default_rng(crn_seed)  # same seed → same OC data
+        for base_method, stat_name in pairs:
+            col = f"{base_method}.{stat_name}"
+            rng_pair = np.random.default_rng(crn_seed)
+
             arl_mean, arl_se, _ = run_arl_experiment(
-                method_name = name,
-                monitor     = monitors[name],
-                ucls        = ucls[name],
+                base_method = base_method,
+                stat_name   = stat_name,
+                monitor     = monitors[base_method],
+                ucls        = ucls[base_method],
                 model_ic    = ic_model,
                 case        = case,
                 d           = d,
                 n_reps      = B1,
                 n_window    = n_window,
                 K_max       = K_max,
-                rng         = rng_method,
+                rng         = rng_pair,
             )
-            row_arl[name] = round(arl_mean, 2)
-            row_se[name]  = round(arl_se,   3)
-            print(f"    {name:<16}  ARL1={arl_mean:7.2f}  SE={arl_se:.3f}",
+            row_arl[col] = round(arl_mean, 2)
+            row_se[col]  = round(arl_se,   3)
+            print(f"    {col:<24}  ARL1={arl_mean:7.2f}  SE={arl_se:.3f}",
                   flush=True)
 
         rows_arl.append(row_arl)
         rows_se.append(row_se)
 
-        # DyPPCA diagnostic ratios
-        rhos = diagnostic_ratios(
-            dyppca_monitor = monitors["dyppca"],
-            ucls           = ucls["dyppca"],
-            model_ic       = ic_model,
-            case           = case,
-            d              = d,
-            n_reps         = min(B1, 500),
-            n_window       = n_window,
-            K_max          = K_max,
-            rng            = rng,
-        )
+        # DyPPCA diagnostic component ratios (always computed if available)
+        rhos = {"rho1": np.nan, "rho2": np.nan,
+                "rho3": np.nan, "rho4": np.nan}
+        if "dyppca" in monitors:
+            rhos = diagnostic_ratios(
+                dyppca_monitor = monitors["dyppca"],
+                ucls           = ucls["dyppca"],
+                model_ic       = ic_model,
+                case           = case,
+                d              = d,
+                n_reps         = min(B1, 500),
+                n_window       = n_window,
+                K_max          = K_max,
+                rng            = rng,
+            )
         rhos["magnitude"] = d
         rows_diag.append(rhos)
-        print(f"    rho=({rhos.get("rho1",0):.3f}, {rhos.get("rho2",0):.3f}, "
-              f"{rhos.get("rho3",0):.3f}, {rhos.get("rho4",0):.3f})"
+
+        print(f"    rho=({rhos.get('rho1', 0):.3f}, {rhos.get('rho2', 0):.3f}, "
+              f"{rhos.get('rho3', 0):.3f}, {rhos.get('rho4', 0):.3f})"
               f"  [{time.time()-t0:.0f}s]", flush=True)
 
     df_arl  = pd.DataFrame(rows_arl).set_index("magnitude")
     df_se   = pd.DataFrame(rows_se).set_index("magnitude")
     df_diag = pd.DataFrame(rows_diag).set_index("magnitude")
 
+    # Also save a human-readable "_std" alias (for plot_results.py compatibility)
     df_arl.to_csv( os.path.join(save_dir, f"{case}_arl.csv"))
     df_se.to_csv(  os.path.join(save_dir, f"{case}_se.csv"))
+    df_se.to_csv(  os.path.join(save_dir, f"{case}_std.csv"))   # alias
     df_diag.to_csv(os.path.join(save_dir, f"{case}_diag.csv"))
-    print(f"  Saved {case}_*.csv -> {save_dir}/")
+    print(f"  Saved {case}_*.csv → {save_dir}/")
     return df_arl, df_se, df_diag
 
 
@@ -175,13 +188,10 @@ def run_all(cases=None, B1=None, fast=False,
     if cases is None:
         cases = ["case1", "case2", "case3", "case4", "case5"]
 
-    B1_run    = 20   if fast else (B1 or config.B1)
-    K_max_run = 50   if fast else config.K_MAX
+    B1_run    = 20  if fast else (B1 or config.B1)
+    K_max_run = 50  if fast else config.K_MAX
 
-    # Load calibration results (no re-fitting, no re-calibrating)
     ic_model, monitors, ucls = load_checkpoint(checkpoint)
-
-    # Use seed from checkpoint if not overridden
     rng = np.random.default_rng(seed or config.SEED + 1)
 
     print(f"\n{'='*60}")
@@ -206,7 +216,7 @@ def run_all(cases=None, B1=None, fast=False,
         all_results[case] = (df_arl, df_se, df_diag)
 
     print(f"\n{'='*60}")
-    print(f"All done.  Results -> {save_dir}/")
+    print(f"All done.  Results → {save_dir}/")
     return all_results
 
 
