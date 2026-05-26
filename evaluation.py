@@ -2,21 +2,24 @@
 evaluation.py
 ARL₁ estimation for all OC cases.
 
-Design
-──────
-Calibration phase  (calibration.py):
-    Every (method, statistic) pair gets its own ARL₀-calibrated threshold.
+Statistic index registry
+────────────────────────
+  DyPPCA         : t1(0), t2(1), t3(2), t4(3), t_total(4)
+  DPCA           : T2(0), Q(1)
+  Static PPCA    : T(0)   — single combined statistic
+  VAR-residual   : T(0)   — single combined statistic
+  LSTM-AE        : T2(0)
 
-OC evaluation phase  (this file):
-    For each case, only the *theoretically relevant* (method, statistic) pairs
-    are compared (see OC_COMPARISON_STATS).  DyPPCA's individual components
-    expose which kind of fault is occurring; t_total is always included as the
-    all-purpose monitor.
+Phase II comparison sets  (OC_COMPARISON_STATS)
+───────────────────────────────────────────────
+For every case we compare:
+  • DyPPCA: the theoretically sensitive component + t_total
+  • DPCA: T2 and Q  (both, since DPCA has no further decomposition)
+  • Static PPCA: T  (combined)
+  • VAR-residual: T  (combined)
+  • LSTM-AE: T2
 
-Alarm rule
-──────────
-For every comparison pair:  alarm  ⟺  stat[si] > ucl[stat_name]
-Single-threshold, no OR-combining across statistics.
+Alarm rule:  alarm  ⟺  stat[si] > h     (single threshold, no OR-combining)
 """
 
 import numpy as np
@@ -24,7 +27,7 @@ from typing import Dict, List, Tuple
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Statistic index registry  (must match monitor_window return order)
+# Statistic index registry
 # ─────────────────────────────────────────────────────────────────────────────
 
 STAT_INDEX: Dict[str, Dict[str, int]] = {
@@ -33,21 +36,17 @@ STAT_INDEX: Dict[str, Dict[str, int]] = {
         "t2":      1,   # residual mean component
         "t3":      2,   # latent dynamics / covariance component
         "t4":      3,   # obs noise covariance component
-        "t_total": 4,   # combined LRT
+        "t_total": 4,   # combined LRT  (t1+t2+t3+t4)
     },
     "dpca": {
         "T2": 0,        # Hotelling T² on augmented scores
         "Q":  1,        # SPE (squared prediction error)
     },
     "static_ppca": {
-        "W":  0,        # combined mean LRT  (T² + Q/σ)
-        "R1": 1,        # latent covariance chart
-        "R2": 2,        # residual noise chart
-        "R":  3,        # R1 + R2  (unknown-source covariance)
+        "T": 0,         # combined: T²+Q/σ₀+R1+R2  (scalar return)
     },
     "var_residual": {
-        "T2": 0,        # mean-shift Hotelling T² on VAR residuals
-        "W":  1,        # covariance-shift trace statistic
+        "T": 0,         # combined: T²_resid+W_cov  (scalar return)
     },
     "lstm_ae": {
         "T2": 0,        # reconstruction-residual Hotelling T²
@@ -55,71 +54,73 @@ STAT_INDEX: Dict[str, Dict[str, int]] = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# OC comparison pairs  — one entry per (method, statistic) to evaluate
+# OC comparison sets
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# Selection rationale
-# ───────────────────
-# case1 — latent mean shift  (E(z_t) = d·e₁):
-#   DyPPCA t1  detects latent-subspace mean deviations directly.
-#   DPCA T2, PPCA W, VAR T2 all monitor mean shifts in various representations.
+# Rationale per case (from Table 1 sensitivity analysis)
+# ───────────────────────────────────────────────────────
+# Case I   — latent mean shift  E(z_t)=d·e₁:
+#     t1 is the sensitive DyPPCA component.
 #
-# case2 — obs noise mean shift  (E(ε_t) = d·u_{q+1}):
-#   DyPPCA t2  is the residual-subspace mean component.
-#   DPCA Q, PPCA W  capture residual/SPE changes.
+# Case II  — obs noise mean shift  E(ε_t)=d·u_{e,1}:
+#     t2 is the sensitive DyPPCA component.
 #
-# case3 — latent AR matrix shift  (B₁ = B₀ + d·E₁₂):
-#   DyPPCA t3  monitors latent dynamics/covariance structure.
-#   DPCA Q, PPCA R1, VAR W  are the covariance-sensitive counterparts.
+# Case III — latent AR matrix shift  B₁=B₀+d·E₁₂:
+#     t3 captures the lagged covariance change.
 #
-# case4 — latent covariance shift  (Cov(z_t) = I + d·e₁e₁ᵀ):
-#   DyPPCA t3 (latent covariance term) is the primary sensor.
+# Case IV  — latent covariance shift  Cov(z_t)=I+d·e₁e₁ᵀ:
+#     t3 captures the change in latent dynamics (B fixed, Σ_z changes).
 #
-# case5 — local obs noise covariance shift  (σ₀ I + d·σ₀·u u ᵀ):
-#   DyPPCA t4  is the obs-noise covariance component.
-#   PPCA R2  measures residual noise variance deviation.
+# Case V   — obs noise covariance shift  Cov(ε_t)=σ₀I+d·σ₀·u u ᵀ:
+#     t4 is the sensitive DyPPCA component.
 #
-# t_total is always included to show overall DyPPCA power regardless of type.
+# In all cases DPCA contributes both T2 and Q (no further decomposition).
+# VAR-residual, Static PPCA, and LSTM-AE each contribute their single statistic.
 
 OC_COMPARISON_STATS: Dict[str, List[Tuple[str, str]]] = {
     "case1": [
         ("dyppca",       "t1"),
         ("dyppca",       "t_total"),
         ("dpca",         "T2"),
-        ("static_ppca",  "W"),
-        ("var_residual", "T2"),
+        ("dpca",         "Q"),
+        ("static_ppca",  "T"),
+        ("var_residual", "T"),
         ("lstm_ae",      "T2"),
     ],
     "case2": [
         ("dyppca",       "t2"),
         ("dyppca",       "t_total"),
+        ("dpca",         "T2"),
         ("dpca",         "Q"),
-        ("static_ppca",  "W"),
-        ("var_residual", "T2"),
+        ("static_ppca",  "T"),
+        ("var_residual", "T"),
         ("lstm_ae",      "T2"),
     ],
     "case3": [
         ("dyppca",       "t3"),
         ("dyppca",       "t_total"),
+        ("dpca",         "T2"),
         ("dpca",         "Q"),
-        ("static_ppca",  "R1"),
-        ("var_residual", "W"),
+        ("static_ppca",  "T"),
+        ("var_residual", "T"),
         ("lstm_ae",      "T2"),
     ],
     "case4": [
         ("dyppca",       "t3"),
         ("dyppca",       "t_total"),
+        ("dpca",         "T2"),
         ("dpca",         "Q"),
-        ("static_ppca",  "R1"),
-        ("var_residual", "W"),
+        ("static_ppca",  "T"),
+        ("var_residual", "T"),
         ("lstm_ae",      "T2"),
     ],
     "case5": [
         ("dyppca",       "t4"),
         ("dyppca",       "t_total"),
+        ("dpca",         "T2"),
         ("dpca",         "Q"),
-        ("static_ppca",  "R2"),
-        ("var_residual", "W"),
+        ("static_ppca",  "T"),
+        ("var_residual", "T"),
         ("lstm_ae",      "T2"),
     ],
 }
@@ -152,19 +153,18 @@ def run_arl_experiment(base_method: str,
                        K_max: int = 2000,
                        rng=None):
     """
-    Estimate ARL₁ for one (method, statistic) pair under OC case `case` with
-    shift magnitude `d`.
+    Estimate ARL₁ for one (method, statistic) pair under OC case `case`.
 
     Parameters
     ----------
-    base_method : key in STAT_INDEX  (e.g. "dyppca", "dpca")
-    stat_name   : key in STAT_INDEX[base_method]  (e.g. "t1", "T2")
+    base_method : key in STAT_INDEX
+    stat_name   : key in STAT_INDEX[base_method]
     monitor     : fitted monitor object
-    ucls        : ucls[base_method]  dict of calibrated thresholds
+    ucls        : ucls[base_method]  (dict {stat_name: h_star})
     model_ic    : IC model dict from build_ic_model()
     case        : "case1" … "case5"
     d           : shift magnitude
-    n_reps      : number of OC replications
+    n_reps      : OC replications
     n_window    : monitoring window size
     K_max       : censoring run length
     rng         : numpy Generator
@@ -188,7 +188,6 @@ def run_arl_experiment(base_method: str,
     rls    = np.empty(n_reps, dtype=np.float64)
 
     for b in range(n_reps):
-        # Warm-up under IC to reach approximate stationarity
         z = np.zeros(q)
         X_warmup, z = simulate_ic_stateful(model_ic, WARMUP, z, rng)
         x_lag       = X_warmup[-1:]
@@ -213,7 +212,7 @@ def run_arl_experiment(base_method: str,
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DyPPCA diagnostic component ratios  (unchanged — still uses t_total alarm)
+# DyPPCA diagnostic component ratios
 # ─────────────────────────────────────────────────────────────────────────────
 
 def diagnostic_ratios(dyppca_monitor,
@@ -226,8 +225,8 @@ def diagnostic_ratios(dyppca_monitor,
                       K_max: int = 2000,
                       rng=None) -> dict:
     """
-    At the alarm window, compute the mean fraction of t_total contributed by
-    each component:  ρⱼ = tⱼ / (t₁+t₂+t₃+t₄).
+    At the t_total alarm window, compute mean fraction contributed by each
+    component:  ρⱼ = tⱼ / (t₁+t₂+t₃+t₄).
 
     Returns {"rho1": …, "rho2": …, "rho3": …, "rho4": …}.
     """

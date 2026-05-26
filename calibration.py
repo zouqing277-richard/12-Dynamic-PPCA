@@ -1,8 +1,16 @@
 """
 calibration.py  —  Two-phase Monte Carlo bisection for UCL calibration.
 
-For every (method, statistic) pair, find threshold h* such that
-|ARL0(h*) - target| <= BISECT_TOL.
+Every (method, statistic) pair gets its own independently calibrated threshold
+h* such that |ARL0(h*) - target| <= BISECT_TOL.
+
+Statistic registry
+──────────────────
+  DyPPCA         : t1, t2, t3, t4, t_total   (5 separate UCLs)
+  DPCA           : T2, Q                       (2 separate UCLs)
+  Static PPCA    : T   (combined T²+Q/σ+R1+R2) (1 UCL)
+  VAR-residual   : T   (combined T²+W)          (1 UCL)
+  LSTM-AE        : T2                           (1 UCL)
 
 Algorithm
 ─────────
@@ -10,15 +18,13 @@ Algorithm
    estimate initial bounds [h_lo, h_hi] from the [0.98, 0.9999] quantile.
 
 2. Coarse phase  (N_COARSE bisection steps, B_COARSE IC sequences each):
-   evaluate ARL0(h_mid) = mean run-length with censoring K_MAX.
-   Update [h_lo, h_hi].
+   evaluate ARL0(h_mid) with censoring K_MAX.  Update [h_lo, h_hi].
 
 3. Fine phase  (runs until |ARL0(h_mid) - target| <= bisect_tol):
    continue with B_FINE sequences per step; safety cap MAX_FINE steps.
 
-Each statistic is bisected **independently** via a single-threshold alarm:
+Each statistic is bisected independently:
     alarm  ⟺  stat[si] > h
-This applies uniformly to all methods and all statistics.
 """
 
 import numpy as np
@@ -30,6 +36,13 @@ from tqdm import tqdm
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Maps  method_name → {stat_name: column_index_in_monitor_window_output}
+#
+# DyPPCA   : monitor_window returns (t1, t2, t3, t4, t_total)  → indices 0–4
+# DPCA     : monitor_window returns (T2, Q)                     → indices 0–1
+# StaticPPCA: monitor_window returns a scalar float             → index  0
+# VARResidual: monitor_window returns a scalar float            → index  0
+# LSTMAEMonitor: monitor_window returns a scalar float          → index  0
+
 CALIBRATION_STATS = {
     "dyppca": {
         "t1":      0,
@@ -43,17 +56,13 @@ CALIBRATION_STATS = {
         "Q":  1,
     },
     "static_ppca": {
-        "W":  0,   # combined mean LRT  (T² + Q/σ)
-        "R1": 1,   # latent covariance chart
-        "R2": 2,   # residual noise chart
-        "R":  3,   # R1 + R2
+        "T": 0,   # combined: T² + Q/σ₀ + R1 + R2
     },
     "var_residual": {
-        "T2": 0,   # mean-shift Hotelling T²
-        "W":  1,   # covariance-shift trace statistic
+        "T": 0,   # combined: T²_resid + W_cov
     },
     "lstm_ae": {
-        "T2": 0,   # reconstruction-residual Hotelling T²
+        "T2": 0,
     },
 }
 
@@ -66,8 +75,8 @@ def _stat_val(row, si: int) -> float:
     """
     Extract statistic value from monitor_window output.
 
-    Handles both scalar returns (e.g. LSTMAEMonitor) and tuple/array
-    returns (e.g. DyPPCA, DPCA, StaticPPCA, VARResidual).
+    Handles both scalar returns (static_ppca, var_residual, lstm_ae) and
+    tuple/array returns (dyppca, dpca).
     """
     if np.isscalar(row):
         return float(row)

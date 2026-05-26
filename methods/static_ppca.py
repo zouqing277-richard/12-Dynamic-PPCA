@@ -2,17 +2,21 @@
 methods/static_ppca.py
 Static PPCA monitoring baseline.
 
-Mean monitoring  :  W = T² + (1/σ)·Q   (combined LRT statistic)
-Covariance monitoring:
-    R1  – latent covariance shift  (score covariance chart)
-    R2  – residual noise shift     (SPE variance chart)
-    R   = R1 + R2  (unknown source)
+Returns a SINGLE combined statistic:
+    T = T² + (1/σ₀)·Q + R1 + R2
 
-All statistics are computed on a sliding window of size n.
+where
+    T²   = n (x̄k − ν₀)ᵀ U Λ₀⁻¹ Uᵀ (x̄k − ν₀)   latent mean
+    Q    = n (x̄k − ν₀)ᵀ Ũₑ Ũₑᵀ (x̄k − ν₀)         residual mean
+    R1   = n/2 · ‖Λ₀⁻¹ UᵀSₖU − Iq‖²_F              latent cov
+    R2   = n/2 · ‖(1/σ₀) ŨₑᵀSₖŨₑ − I_{p−q}‖²_F    noise cov
+
+This follows Tk,PPCA = T²k,PPCA + (1/σ₀)Qk,PPCA + R1k,PPCA + R2k,PPCA
+(Section 4 of the paper).  One UCL is calibrated for this combined statistic.
 """
 
 import numpy as np
-from scipy.linalg import eigh, inv
+from scipy.linalg import eigh
 
 
 class StaticPPCA:
@@ -25,8 +29,7 @@ class StaticPPCA:
     """
 
     def __init__(self, q: int):
-        self.q = q
-        # Phase I
+        self.q       = q
         self.nu0     = None   # (p,)
         self.U       = None   # (p, q)
         self.Ue      = None   # (p, p-q)
@@ -34,19 +37,12 @@ class StaticPPCA:
         self.sigma0  = None   # float
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Phase I
-    # ──────────────────────────────────────────────────────────────────────────
-
-
-    # ──────────────────────────────────────────────────────────────────────────
     # Oracle constructor
     # ──────────────────────────────────────────────────────────────────────────
 
     @classmethod
     def from_true_model(cls, ic_model: dict) -> "StaticPPCA":
-        """
-        Build a StaticPPCA monitor from the TRUE IC model parameters.
-        """
+        """Build from TRUE IC model parameters (no Phase I estimation error)."""
         m         = cls(q=len(ic_model["Lambda0"]))
         m.nu0     = ic_model["nu0"].copy()
         m.U       = ic_model["U0"].copy()
@@ -54,16 +50,19 @@ class StaticPPCA:
         m.Lambda0 = ic_model["Lambda0"].copy()
         m.sigma0  = float(ic_model["sigma0"])
         return m
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # Phase I
+    # ──────────────────────────────────────────────────────────────────────────
+
     def fit(self, X: np.ndarray) -> "StaticPPCA":
         """
         Fit static PPCA from Phase I data.
 
         Parameters
         ----------
-        X : array (N, p) or (N+1, p)
-            Uses only X[1:] (current observations) for consistency with DyPPCA.
+        X : array (N+1, p)  — uses X[1:] for consistency with DyPPCA.
         """
-        # Use same slice convention as DyPPCA so Phase I sizes match
         Xc = X[1:] if X.shape[0] > 1 else X
         N, p = Xc.shape
         q = self.q
@@ -85,23 +84,22 @@ class StaticPPCA:
         return self
 
     # ──────────────────────────────────────────────────────────────────────────
-    # Phase II statistics
+    # Phase II  —  single combined statistic
     # ──────────────────────────────────────────────────────────────────────────
 
-    def monitor_window(self, X_win: np.ndarray):
+    def monitor_window(self, X_win: np.ndarray) -> float:
         """
-        Compute W, R1, R2, R for a window.
+        Compute the combined PPCA monitoring statistic for one window.
+
+            T = T² + (1/σ₀)·Q + R1 + R2
 
         Parameters
         ----------
-        X_win : array (n+1, p) — only X_win[1:] (n rows) are used.
+        X_win : array (n+1, p)  — only X_win[1:] (n rows) are used.
 
         Returns
         -------
-        W  : float  combined mean statistic
-        R1 : float  latent covariance chart
-        R2 : float  residual noise chart
-        R  : float  R1 + R2
+        T_combined : float
         """
         X = X_win[1:]              # (n, p)
         n = X.shape[0]
@@ -114,49 +112,41 @@ class StaticPPCA:
         q      = self.q
         p      = U.shape[0]
 
-        # ── Mean statistic W ──────────────────────────────────────────────────
-        xbar = X.mean(axis=0)
-        d    = xbar - nu0
+        # ── Mean components ───────────────────────────────────────────────────
+        xbar   = X.mean(axis=0)
+        d      = xbar - nu0                                  # (p,)
 
-        scores    = U.T @ d                                  # (q,)
-        resid_mu  = d - U @ scores                          # residual in obs space
-        T2 = n * np.sum(scores ** 2 / L0)
-        Q  = n * np.sum(resid_mu ** 2)
-        W  = float(T2 + Q / sigma0)
+        T2 = float(n * (U.T @ d) @ np.diag(1.0 / L0) @ (U.T @ d))
+        Q  = float(n * (Ue.T @ d) @ (Ue.T @ d))
 
-        # ── Covariance statistics R1, R2 ─────────────────────────────────────
-        D  = X - xbar                                         # (n, p)
-        Sk = D.T @ D / n                                      # (p, p)
+        # ── Covariance components ─────────────────────────────────────────────
+        D  = X - xbar                                        # (n, p)
+        Sk = D.T @ D / n                                     # (p, p)
 
-        # Score covariance  Sₛ = UᵀSₖU  (should ≈ Λ₀ under IC)
-        Ss   = U.T @ Sk @ U                                   # (q, q)
-        Dev1 = Ss / L0[:, None] - np.eye(q)                  # (q, q)  element-wise Λ⁻¹ Sₛ - I
-        # Properly: (Λ₀⁻¹ Sₛ - I)
-        Dev1 = np.diag(1.0 / L0) @ Ss - np.eye(q)
-        R1   = float(n * np.trace(Dev1 @ Dev1))
+        # R1: latent subspace covariance
+        Ss   = U.T @ Sk @ U                                  # (q, q)
+        Dev1 = np.diag(1.0 / L0) @ Ss - np.eye(q)           # Λ₀⁻¹ Sₛ − I
+        R1   = float(0.5 * n * np.trace(Dev1 @ Dev1))
 
-        # Residual variance  Sₑ = UₑᵀSₖUₑ  (should ≈ σ₀ I under IC)
-        Se   = Ue.T @ Sk @ Ue                                 # (p-q, p-q)
+        # R2: residual noise covariance
+        Se   = Ue.T @ Sk @ Ue                                # (p-q, p-q)
         Dev2 = Se / sigma0 - np.eye(p - q)
-        R2   = float(n * np.trace(Dev2 @ Dev2))
+        R2   = float(0.5 * n * np.trace(Dev2 @ Dev2))
 
-        R = R1 + R2
-        return W, R1, R2, R
+        return T2 + Q / sigma0 + R1 + R2
 
-    def monitor_sequence(self, X: np.ndarray, n: int):
+    def monitor_sequence(self, X: np.ndarray, n: int) -> np.ndarray:
         """
-        Apply sliding-window monitoring.
+        Sliding-window monitoring.
 
         Returns
         -------
-        stats : array (K, 4) columns = [W, R1, R2, R]
+        stats : array (K, 1)  — column 0 is T_combined.
         """
         T = X.shape[0]
         K = (T - 1) // n
-        stats = np.empty((K, 4))
+        stats = np.empty((K, 1))
         for k in range(K):
             start = k * n
-            end   = start + n + 1
-            X_win = X[start:end]
-            stats[k] = self.monitor_window(X_win)
+            stats[k, 0] = self.monitor_window(X[start : start + n + 1])
         return stats
