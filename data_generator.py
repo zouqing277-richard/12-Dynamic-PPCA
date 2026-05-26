@@ -314,3 +314,45 @@ def generate_oc(model, T, case, d, rng=None):
     if case not in OC_GENERATORS:
         raise ValueError(f"Unknown case: {case}")
     return OC_GENERATORS[case](model, T, d, rng=rng)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Vectorised batch simulation  (eliminates the B-dimension Python loop)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def simulate_ic_batch_stateful(model, T, Z_init, rng):
+    """
+    Simulate T IC observations for B sequences **in parallel** using NumPy.
+
+    Instead of looping over B sequences one at a time, all B latent states
+    are propagated simultaneously via (B,q) matrix operations, eliminating
+    the Python loop over B that dominates calibration runtime.
+
+    Parameters
+    ----------
+    model  : IC model dict from build_ic_model()
+    T      : number of time steps to simulate
+    Z_init : (B, q) initial latent states for B sequences
+    rng    : numpy Generator
+
+    Returns
+    -------
+    X       : (B, T, p)  observations
+    Z_final : (B, q)     latent state after step T (pass to next call)
+    """
+    A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
+    sigma0, nu0  = model["sigma0"], model["nu0"]
+    B_sz, q = Z_init.shape
+    p = A0.shape[0]
+    L = np.linalg.cholesky(Psi0)
+
+    # Pre-generate ALL noise at once — one large BLAS call beats T small ones
+    xi  = rng.standard_normal((T, B_sz, q)) @ L.T   # (T, B, q)
+    eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))  # (T, B, p)
+
+    X = np.empty((B_sz, T, p))
+    Z = Z_init.copy()
+    for t in range(T):            # T=50 iterations, each is (B,q) BLAS op
+        Z      = Z @ B0.T + xi[t]
+        X[:, t] = nu0 + Z @ A0.T + eps[t]
+    return X, Z

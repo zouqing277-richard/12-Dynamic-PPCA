@@ -82,12 +82,12 @@ def run_phase1(N_values=None, R=100, seed=config.SEED, save_dir="results/figures
         ax.set_xlabel("Phase I sample size $N$")
         ax.set_ylabel("Estimation error")
 
-    fig.suptitle(f"Phase I Estimation Accuracy  "
-                 f"(p={config.P}, q={config.Q}, {R} replications)",
-                 fontsize=12)
+    #fig.suptitle(f"Phase I Estimation Accuracy  "
+                 #f"(p={config.P}, q={config.Q}, {R} replications)",
+                 #fontsize=12)
     plt.tight_layout()
-    fig.savefig(os.path.join(save_dir, "phase1_estimation.pdf"), dpi=150)
-    fig.savefig(os.path.join(save_dir, "phase1_estimation.png"), dpi=150)
+    fig.savefig(os.path.join(save_dir, "phase1_estimation.pdf"), dpi=300)
+    fig.savefig(os.path.join(save_dir, "phase1_estimation.png"), dpi=300)
     plt.close(fig)
     print(f"Saved Phase I figure → {save_dir}/phase1_estimation.{{pdf,png}}")
 
