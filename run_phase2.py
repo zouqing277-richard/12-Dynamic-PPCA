@@ -17,7 +17,7 @@ import numpy as np
 import pandas as pd
 
 import config
-from evaluation import run_arl_experiment_crn, diagnostic_ratios_crn, OC_COMPARISON_STATS
+from evaluation import run_arl_experiment_crn, OC_COMPARISON_STATS
 
 CHECKPOINT_FILE = "results/calibration/checkpoint.pkl"
 
@@ -70,7 +70,7 @@ def run_one_case(case, ic_model, monitors, ucls, shifts,
     print(f"  Comparing: {col_names}")
     print(f"{'─'*60}")
 
-    rows_arl, rows_se, rows_diag = [], [], []
+    rows_arl, rows_se = [], []
 
     for d in shifts:
         t0 = time.time()
@@ -100,37 +100,17 @@ def run_one_case(case, ic_model, monitors, ucls, shifts,
         rows_arl.append(row_arl)
         rows_se.append(row_se)
 
-        # DyPPCA diagnostic ratios
-        rhos = {"rho1":np.nan,"rho2":np.nan,"rho3":np.nan,"rho4":np.nan}
-        if "dyppca" in monitors:
-            rhos = diagnostic_ratios_crn(
-                dyppca_monitor = monitors["dyppca"],
-                ucls           = ucls,
-                model_ic       = ic_model,
-                case           = case,
-                d              = d,
-                n_window       = config.N_WINDOW,
-                K_max_crn      = K_max_crn,
-                B_crn          = min(B_crn, 500),
-                rng            = rng,
-            )
-        rhos["magnitude"] = d
-        rows_diag.append(rhos)
 
-        print(f"    ρ=({rhos.get('rho1',0):.3f}, {rhos.get('rho2',0):.3f}, "
-              f"{rhos.get('rho3',0):.3f}, {rhos.get('rho4',0):.3f})"
-              f"  [{time.time()-t0:.0f}s]", flush=True)
+        print(f"  [{time.time()-t0:.0f}s]", flush=True)
 
     df_arl  = pd.DataFrame(rows_arl).set_index("magnitude")
     df_se   = pd.DataFrame(rows_se).set_index("magnitude")
-    df_diag = pd.DataFrame(rows_diag).set_index("magnitude")
 
     df_arl.to_csv(os.path.join(save_dir, f"{case}_arl.csv"))
     df_se.to_csv( os.path.join(save_dir, f"{case}_se.csv"))
     df_se.to_csv( os.path.join(save_dir, f"{case}_std.csv"))
-    df_diag.to_csv(os.path.join(save_dir,f"{case}_diag.csv"))
     print(f"  Saved {case}_*.csv → {save_dir}/")
-    return df_arl, df_se, df_diag
+    return df_arl, df_se
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -175,7 +155,7 @@ def run_all(cases=None, B_crn=None, fast=False,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase II ARL experiment (CRN)")
     parser.add_argument("--cases", nargs="+", default=None)
-    parser.add_argument("--B",     type=int,  default=10000,
+    parser.add_argument("--B",     type=int,  default=None,
                         help=f"OC sequences (default: {config.B_CRN})")
     parser.add_argument("--fast",  action="store_true",
                         help="Debug: B=50, K_max=100")

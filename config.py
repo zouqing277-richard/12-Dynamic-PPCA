@@ -67,7 +67,7 @@ N_TRAIN = 2000
 # Phase II
 # ─────────────────────────────────────────────────────────────────────────────
 
-N_WINDOW = 50      # window size n;  n/(p−q) = 50/7 ≈ 7.1
+N_WINDOW = 100      # window size n;  n/(p−q) = 50/7 ≈ 7.1
 ARL0     = 200
 K_MAX    = 2000
 
@@ -76,7 +76,7 @@ K_MAX    = 2000
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── CRN calibration parameters ──────────────────────────────────────────────
-B_CRN       = 5_000     # IC sequences per method (CRN reduces variance vs old B_FINE)
+B_CRN       = 10_000    # IC sequences per method
 K_MAX_CRN   = 1_500     # windows per sequence  (P(RL>1500) ≈ 0.1% → negligible censoring)
 N_COARSE    = 20        # binary search steps in coarse phase
 BISECT_TOL  = 2.0       # stop when |ARL₀(h) − 200| ≤ 2
@@ -115,7 +115,7 @@ LSTM_PATIENCE   = 10
 SHIFTS = {
     "case1": [0.2,  0.4,  0.6,  0.8,  1.0 ],   # latent mean shift
     "case2": [0.1,  0.2,  0.3,  0.4,  0.5 ],   # obs mean shift (general direction)
-    "case3": [0.05, 0.10, 0.15, 0.20, 0.25],   # latent AR matrix shift
+    "case3": [0.20, 0.25, 0.30, 0.35, 0.40],   # latent AR matrix shift
     "case4": [0.10, 0.20, 0.30, 0.40, 0.50],   # latent cov shift (Delta_z[1,2]=[2,1]=d)
     "case5": [0.04, 0.08, 0.12, 0.16, 0.20],   # obs noise cov shift (Sigma_eps[2,5]=[5,2]=d)
 }
