@@ -114,10 +114,10 @@ LSTM_PATIENCE   = 10
 
 SHIFTS = {
     "case1": [0.2,  0.4,  0.6,  0.8,  1.0 ],   # latent mean shift
-    "case2": [0.2,  0.4,  0.6,  0.8,  1.0 ],   # obs noise mean shift
+    "case2": [0.1,  0.2,  0.3,  0.4,  0.5 ],   # obs mean shift (general direction)
     "case3": [0.05, 0.10, 0.15, 0.20, 0.25],   # latent AR matrix shift
-    "case4": [0.10, 0.20, 0.30, 0.40, 0.50],   # latent covariance shift
-    "case5": [0.25, 0.50, 0.75, 1.00, 1.25],   # obs noise cov shift
+    "case4": [0.10, 0.20, 0.30, 0.40, 0.50],   # latent cov shift (Delta_z[1,2]=[2,1]=d)
+    "case5": [0.04, 0.08, 0.12, 0.16, 0.20],   # obs noise cov shift (Sigma_eps[2,5]=[5,2]=d)
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

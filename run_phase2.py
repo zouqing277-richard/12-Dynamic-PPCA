@@ -175,7 +175,7 @@ def run_all(cases=None, B_crn=None, fast=False,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Phase II ARL experiment (CRN)")
     parser.add_argument("--cases", nargs="+", default=None)
-    parser.add_argument("--B",     type=int,  default=None,
+    parser.add_argument("--B",     type=int,  default=10000,
                         help=f"OC sequences (default: {config.B_CRN})")
     parser.add_argument("--fast",  action="store_true",
                         help="Debug: B=50, K_max=100")

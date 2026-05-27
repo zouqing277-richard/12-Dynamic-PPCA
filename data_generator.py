@@ -12,10 +12,10 @@ U₀ and Λ₀ are derived from SVD(A₀) rather than generated randomly.
 
 OC cases (Section 5.3):
     Case I   — latent mean shift:        E(z_t) = δ = d · e₁
-    Case II  — obs noise mean shift:     E(ε_t) = d · u_{q+1}
+    Case II  — obs noise mean shift:     E(ε_t) = d · e₅  (5th obs component)
     Case III — latent AR matrix shift:   B₁ = B₀ + d · E₁₂  (off-diagonal)
-    Case IV  — latent covariance shift:  Cov(z_t) = I_q + d · e₁e₁ᵀ
-    Case V   — obs noise cov shift:      Cov(ε_t) = σ₀ I + d·σ₀·u_{q+1}u_{q+1}ᵀ
+    Case IV  — latent covariance shift:  Cov(z_t) = I_q + d·(e₂e₃ᵀ + e₃e₂ᵀ)
+    Case V   — obs noise cov shift:      Cov(ε_t) = σ₀ I_p + d·(e₃e₆ᵀ + e₆e₃ᵀ)  [positions (2,5)/(5,2)]
 """
 
 import numpy as np
@@ -132,7 +132,7 @@ def generate_oc_case2(model, T, d, rng=None):
     sigma0, nu0  = model["sigma0"], model["nu0"]
     p, q = A0.shape
     L           = np.linalg.cholesky(Psi0)
-    delta_tilde = d * model["Ue"][:, 0]   # d · u_{q+1}
+    delta_tilde = d * np.eye(p)[4]               # shift on 5th obs component
     X = np.empty((T, p))
     z = np.zeros(q)
     for t in range(T):
@@ -179,7 +179,7 @@ def generate_oc_case4(model, T, d, rng=None):
     A0, B0, sigma0, nu0 = (model["A0"], model["B0"],
                             model["sigma0"], model["nu0"])
     p, q = A0.shape
-    Delta_z  = np.zeros((q, q)); Delta_z[0, 0] = d
+    Delta_z  = np.zeros((q, q)); Delta_z[1, 2] = d; Delta_z[2, 1] = d
     Sigma_z1 = np.eye(q) + Delta_z
     Psi1     = Sigma_z1 - B0 @ Sigma_z1 @ B0.T
     ev       = np.linalg.eigvalsh(Psi1)
@@ -204,17 +204,16 @@ def generate_oc_case5(model, T, d, rng=None):
     A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
     sigma0, nu0  = model["sigma0"], model["nu0"]
     p, q = A0.shape
-    L    = np.linalg.cholesky(Psi0)
-    u_e1 = model["Ue"][:, 0]
-    # ε_t ~ N(0, σ₀(I + d u_e1 u_e1ᵀ)):  scale that direction by √(1+d)
-    sqrt_extra = np.sqrt(1.0 + d) - 1.0
+    L_z  = np.linalg.cholesky(Psi0)
+    # Cov(ε_t) = σ₀ I_p + d·(e₃e₆ᵀ + e₆e₃ᵀ)  [0-indexed: positions (2,5) and (5,2)]
+    Sigma_eps       = sigma0 * np.eye(p)
+    Sigma_eps[2, 5] = d;  Sigma_eps[5, 2] = d
+    L_eps = np.linalg.cholesky(Sigma_eps)
     X = np.empty((T, p))
     z = np.zeros(q)
     for t in range(T):
-        z   = B0 @ z + L @ rng.standard_normal(q)
-        xi  = rng.standard_normal(p)
-        eps = np.sqrt(sigma0) * (xi + sqrt_extra * (u_e1 @ xi) * u_e1)
-        X[t] = nu0 + A0 @ z + eps
+        z     = B0 @ z + L_z @ rng.standard_normal(q)
+        X[t]  = nu0 + A0 @ z + L_eps @ rng.standard_normal(p)
     return X
 
 
@@ -260,7 +259,7 @@ def simulate_oc_stateful(model, T, case, d, z_init, rng):
 
     elif case == "case2":
         L           = np.linalg.cholesky(Psi0)
-        delta_tilde = d * Ue[:, 0]
+        delta_tilde = d * np.eye(p)[4]              # shift on 5th obs component
         for t in range(T):
             z    = B0 @ z + L @ rng.standard_normal(q)
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0)*rng.standard_normal(p) + delta_tilde
@@ -274,7 +273,7 @@ def simulate_oc_stateful(model, T, case, d, z_init, rng):
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
 
     elif case == "case4":
-        Delta_z = np.zeros((q, q)); Delta_z[0, 0] = d
+        Delta_z = np.zeros((q, q)); Delta_z[1, 2] = d; Delta_z[2, 1] = d
         Sigma_z = np.eye(q) + Delta_z
         Psi1    = Sigma_z - B0 @ Sigma_z @ B0.T
         L1      = np.linalg.cholesky(Psi1)
@@ -283,14 +282,13 @@ def simulate_oc_stateful(model, T, case, d, z_init, rng):
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
 
     elif case == "case5":
-        L_z   = np.linalg.cholesky(Psi0)
-        u_e1  = Ue[:, 0]
-        sqrt_extra = np.sqrt(1.0 + d) - 1.0
+        L_z             = np.linalg.cholesky(Psi0)
+        Sigma_eps       = sigma0 * np.eye(p)
+        Sigma_eps[2, 5] = d;  Sigma_eps[5, 2] = d
+        L_eps           = np.linalg.cholesky(Sigma_eps)
         for t in range(T):
             z    = B0 @ z + L_z @ rng.standard_normal(q)
-            xi   = rng.standard_normal(p)
-            eps  = np.sqrt(sigma0) * (xi + sqrt_extra * (u_e1 @ xi) * u_e1)
-            X[t] = nu0 + A0 @ z + eps
+            X[t] = nu0 + A0 @ z + L_eps @ rng.standard_normal(p)
 
     else:
         raise ValueError(f"Unknown case: {case}")
@@ -395,7 +393,7 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t]
 
     elif case == "case2":
-        delta_tilde = d * Ue[:, 0]
+        delta_tilde = d * np.eye(p)[4]            # shift on 5th obs component
         xi  = rng.standard_normal((T, B_sz, q)) @ L.T
         eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
         for t in range(T):
@@ -413,7 +411,7 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t]
 
     elif case == "case4":
-        Delta_z = np.zeros((q,q)); Delta_z[0,0] = d
+        Delta_z = np.zeros((q,q)); Delta_z[1,2] = d; Delta_z[2,1] = d
         Sigma_z = np.eye(q) + Delta_z
         Psi1    = Sigma_z - B0 @ Sigma_z @ B0.T
         L1      = np.linalg.cholesky(Psi1)
@@ -424,15 +422,14 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t]
 
     elif case == "case5":
-        u_e1       = Ue[:, 0]
-        sqrt_extra = np.sqrt(1.0 + d) - 1.0
-        xi  = rng.standard_normal((T, B_sz, q)) @ L.T
-        xi_p = rng.standard_normal((T, B_sz, p))
+        xi              = rng.standard_normal((T, B_sz, q)) @ L.T
+        Sigma_eps       = sigma0 * np.eye(p)
+        Sigma_eps[2, 5] = d;  Sigma_eps[5, 2] = d
+        L_eps           = np.linalg.cholesky(Sigma_eps)
+        xi_p            = rng.standard_normal((T, B_sz, p))
         for t in range(T):
             Z      = Z @ B0.T + xi[t]
-            eps    = np.sqrt(sigma0) * (xi_p[t] + sqrt_extra *
-                     (xi_p[t] @ u_e1)[:, None] * u_e1)
-            X[:,t] = nu0 + Z @ A0.T + eps
+            X[:,t] = nu0 + Z @ A0.T + xi_p[t] @ L_eps.T
     else:
         raise ValueError(f"Unknown case: {case}")
 
