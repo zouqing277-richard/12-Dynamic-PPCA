@@ -105,14 +105,14 @@ def simulate_ic(model, T, rng=None):
 # OC Case I — latent mean shift  E(z_t) = δ = d · e₁
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_oc_case1(model, T, d, rng=None):
+def generate_oc_case1(model, T, d, rng=None, loc=0):
     if rng is None:
         rng = np.random.default_rng()
     A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
     sigma0, nu0  = model["sigma0"], model["nu0"]
     p, q = A0.shape
     L    = np.linalg.cholesky(Psi0)
-    delta = np.zeros(q); delta[0] = d
+    delta = np.zeros(q); delta[loc] = d
     X     = np.empty((T, p))
     z     = delta.copy()
     for t in range(T):
@@ -125,14 +125,14 @@ def generate_oc_case1(model, T, d, rng=None):
 # OC Case II — observation noise mean shift  E(ε_t) = d · u_{q+1}
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_oc_case2(model, T, d, rng=None):
+def generate_oc_case2(model, T, d, rng=None, loc=4):
     if rng is None:
         rng = np.random.default_rng()
     A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
     sigma0, nu0  = model["sigma0"], model["nu0"]
     p, q = A0.shape
     L           = np.linalg.cholesky(Psi0)
-    delta_tilde = d * np.eye(p)[4]               # shift on 5th obs component
+    delta_tilde = d * np.eye(p)[loc]              # shift on obs component `loc`
     X = np.empty((T, p))
     z = np.zeros(q)
     for t in range(T):
@@ -145,7 +145,7 @@ def generate_oc_case2(model, T, d, rng=None):
 # OC Case III — latent AR matrix shift  ΔB = d · E₁₂  (off-diagonal)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_oc_case3(model, T, d, rng=None):
+def generate_oc_case3(model, T, d, rng=None, loc=(0,1)):
     """
     B₁ = B₀ + d·E₁₂  (E₁₂: element [0,1] perturbed by +d).
     Ψ₁ = I_q − B₁B₁ᵀ   preserves Cov(z_t) = I_q.
@@ -155,7 +155,7 @@ def generate_oc_case3(model, T, d, rng=None):
     A0, sigma0, nu0 = model["A0"], model["sigma0"], model["nu0"]
     p, q = A0.shape
     B1   = model["B0"].copy()
-    B1[0, 1] += d
+    B1[loc[0], loc[1]] += d
     Psi1 = np.eye(q) - B1 @ B1.T
     ev   = np.linalg.eigvalsh(Psi1)
     if ev.min() <= 0:
@@ -173,13 +173,13 @@ def generate_oc_case3(model, T, d, rng=None):
 # OC Case IV — latent covariance shift  Cov(z_t) = I_q + d · e₁e₁ᵀ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_oc_case4(model, T, d, rng=None):
+def generate_oc_case4(model, T, d, rng=None, loc=(1,2)):
     if rng is None:
         rng = np.random.default_rng()
     A0, B0, sigma0, nu0 = (model["A0"], model["B0"],
                             model["sigma0"], model["nu0"])
     p, q = A0.shape
-    Delta_z  = np.zeros((q, q)); Delta_z[1, 2] = d; Delta_z[2, 1] = d
+    Delta_z  = np.zeros((q, q)); Delta_z[loc[0], loc[1]] = d; Delta_z[loc[1], loc[0]] = d
     Sigma_z1 = np.eye(q) + Delta_z
     Psi1     = Sigma_z1 - B0 @ Sigma_z1 @ B0.T
     ev       = np.linalg.eigvalsh(Psi1)
@@ -198,7 +198,7 @@ def generate_oc_case4(model, T, d, rng=None):
 # OC Case V — local obs noise cov shift  Cov(ε_t) = σ₀I + d·σ₀·u_{q+1}u_{q+1}ᵀ
 # ─────────────────────────────────────────────────────────────────────────────
 
-def generate_oc_case5(model, T, d, rng=None):
+def generate_oc_case5(model, T, d, rng=None, loc=(2,5)):
     if rng is None:
         rng = np.random.default_rng()
     A0, B0, Psi0 = model["A0"], model["B0"], model["Psi0"]
@@ -206,8 +206,8 @@ def generate_oc_case5(model, T, d, rng=None):
     p, q = A0.shape
     L_z  = np.linalg.cholesky(Psi0)
     # Cov(ε_t) = σ₀ I_p + d·(e₃e₆ᵀ + e₆e₃ᵀ)  [0-indexed: positions (2,5) and (5,2)]
-    Sigma_eps       = sigma0 * np.eye(p)
-    Sigma_eps[2, 5] = d;  Sigma_eps[5, 2] = d
+    Sigma_eps               = sigma0 * np.eye(p)
+    Sigma_eps[loc[0], loc[1]] = d;  Sigma_eps[loc[1], loc[0]] = d
     L_eps = np.linalg.cholesky(Sigma_eps)
     X = np.empty((T, p))
     z = np.zeros(q)
@@ -238,7 +238,7 @@ def simulate_ic_stateful(model, T, z_init, rng):
     return X, z
 
 
-def simulate_oc_stateful(model, T, case, d, z_init, rng):
+def simulate_oc_stateful(model, T, case, d, z_init, rng, loc=None):
     """
     Simulate T OC observations starting from z_init.
     Returns (X, z_final).
@@ -252,20 +252,23 @@ def simulate_oc_stateful(model, T, case, d, z_init, rng):
 
     if case == "case1":
         L     = np.linalg.cholesky(Psi0)
-        delta = np.zeros(q); delta[0] = d
+        _loc1 = loc if loc is not None else 0
+        delta = np.zeros(q); delta[_loc1] = d
         for t in range(T):
             z    = delta + B0 @ (z - delta) + L @ rng.standard_normal(q)
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
 
     elif case == "case2":
         L           = np.linalg.cholesky(Psi0)
-        delta_tilde = d * np.eye(p)[4]              # shift on 5th obs component
+        _loc2 = loc if loc is not None else 4
+        delta_tilde = d * np.eye(p)[_loc2]
         for t in range(T):
             z    = B0 @ z + L @ rng.standard_normal(q)
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0)*rng.standard_normal(p) + delta_tilde
 
     elif case == "case3":
-        B1   = B0.copy(); B1[0, 1] += d
+        _loc3 = loc if loc is not None else (0,1)
+        B1   = B0.copy(); B1[_loc3[0], _loc3[1]] += d
         Psi1 = np.eye(q) - B1 @ B1.T
         L1   = np.linalg.cholesky(Psi1)
         for t in range(T):
@@ -273,7 +276,8 @@ def simulate_oc_stateful(model, T, case, d, z_init, rng):
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
 
     elif case == "case4":
-        Delta_z = np.zeros((q, q)); Delta_z[1, 2] = d; Delta_z[2, 1] = d
+        _loc4 = loc if loc is not None else (1,2)
+        Delta_z = np.zeros((q, q)); Delta_z[_loc4[0], _loc4[1]] = d; Delta_z[_loc4[1], _loc4[0]] = d
         Sigma_z = np.eye(q) + Delta_z
         Psi1    = Sigma_z - B0 @ Sigma_z @ B0.T
         L1      = np.linalg.cholesky(Psi1)
@@ -282,9 +286,10 @@ def simulate_oc_stateful(model, T, case, d, z_init, rng):
             X[t] = nu0 + A0 @ z + np.sqrt(sigma0) * rng.standard_normal(p)
 
     elif case == "case5":
+        _loc5 = loc if loc is not None else (2,5)
         L_z             = np.linalg.cholesky(Psi0)
-        Sigma_eps       = sigma0 * np.eye(p)
-        Sigma_eps[2, 5] = d;  Sigma_eps[5, 2] = d
+        Sigma_eps               = sigma0 * np.eye(p)
+        Sigma_eps[_loc5[0], _loc5[1]] = d;  Sigma_eps[_loc5[1], _loc5[0]] = d
         L_eps           = np.linalg.cholesky(Sigma_eps)
         for t in range(T):
             z    = B0 @ z + L_z @ rng.standard_normal(q)
@@ -356,7 +361,7 @@ def simulate_ic_batch_stateful(model, T, Z_init, rng):
     return X, Z
 
 
-def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
+def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng, loc=None):
     """
     Simulate T OC observations for B sequences in parallel.
     Batch version of simulate_oc_stateful for CRN Phase II.
@@ -385,7 +390,8 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
     Z = Z_init.copy()
 
     if case == "case1":
-        delta = np.zeros(q); delta[0] = d
+        _loc1 = loc if loc is not None else 0
+        delta = np.zeros(q); delta[_loc1] = d
         xi  = rng.standard_normal((T, B_sz, q)) @ L.T
         eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
         for t in range(T):
@@ -393,7 +399,8 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t]
 
     elif case == "case2":
-        delta_tilde = d * np.eye(p)[4]            # shift on 5th obs component
+        _loc2 = loc if loc is not None else 4
+        delta_tilde = d * np.eye(p)[_loc2]
         xi  = rng.standard_normal((T, B_sz, q)) @ L.T
         eps = np.sqrt(sigma0) * rng.standard_normal((T, B_sz, p))
         for t in range(T):
@@ -401,7 +408,8 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t] + delta_tilde
 
     elif case == "case3":
-        B1   = B0.copy(); B1[0,1] += d
+        _loc3 = loc if loc is not None else (0,1)
+        B1   = B0.copy(); B1[_loc3[0],_loc3[1]] += d
         Psi1 = np.eye(q) - B1 @ B1.T
         L1   = np.linalg.cholesky(Psi1)
         xi   = rng.standard_normal((T, B_sz, q)) @ L1.T
@@ -411,7 +419,8 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t]
 
     elif case == "case4":
-        Delta_z = np.zeros((q,q)); Delta_z[1,2] = d; Delta_z[2,1] = d
+        _loc4 = loc if loc is not None else (1,2)
+        Delta_z = np.zeros((q,q)); Delta_z[_loc4[0],_loc4[1]] = d; Delta_z[_loc4[1],_loc4[0]] = d
         Sigma_z = np.eye(q) + Delta_z
         Psi1    = Sigma_z - B0 @ Sigma_z @ B0.T
         L1      = np.linalg.cholesky(Psi1)
@@ -422,9 +431,10 @@ def simulate_oc_batch_stateful(model, T, case, d, Z_init, rng):
             X[:,t] = nu0 + Z @ A0.T + eps[t]
 
     elif case == "case5":
+        _loc5 = loc if loc is not None else (2,5)
         xi              = rng.standard_normal((T, B_sz, q)) @ L.T
-        Sigma_eps       = sigma0 * np.eye(p)
-        Sigma_eps[2, 5] = d;  Sigma_eps[5, 2] = d
+        Sigma_eps               = sigma0 * np.eye(p)
+        Sigma_eps[_loc5[0], _loc5[1]] = d;  Sigma_eps[_loc5[1], _loc5[0]] = d
         L_eps           = np.linalg.cholesky(Sigma_eps)
         xi_p            = rng.standard_normal((T, B_sz, p))
         for t in range(T):

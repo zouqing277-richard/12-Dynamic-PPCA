@@ -67,17 +67,17 @@ N_TRAIN = 2000
 # Phase II
 # ─────────────────────────────────────────────────────────────────────────────
 
-N_WINDOW = 100      # window size n;  n/(p−q) = 50/7 ≈ 7.1
+N_WINDOW = 100      # window size n; 
 ARL0     = 200
-K_MAX    = 2000
+K_MAX    = 1000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Calibration  (two-phase MC bisection on ARL₀)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── CRN calibration parameters ──────────────────────────────────────────────
-B_CRN       = 10_000    # IC sequences per method
-K_MAX_CRN   = 1_500     # windows per sequence  (P(RL>1500) ≈ 0.1% → negligible censoring)
+B_CRN       = 10_000     # IC sequences per method (CRN reduces variance vs old B_FINE)
+K_MAX_CRN   =  1000    # windows per sequence  (P(RL>1000) ≈ 0.1% → negligible censoring)
 N_COARSE    = 20        # binary search steps in coarse phase
 BISECT_TOL  = 2.0       # stop when |ARL₀(h) − 200| ≤ 2
 MAX_FINE    = 60        # safety cap
@@ -115,7 +115,7 @@ LSTM_PATIENCE   = 10
 SHIFTS = {
     "case1": [0.2,  0.4,  0.6,  0.8,  1.0 ],   # latent mean shift
     "case2": [0.1,  0.2,  0.3,  0.4,  0.5 ],   # obs mean shift (general direction)
-    "case3": [0.20, 0.25, 0.30, 0.35, 0.40],   # latent AR matrix shift
+    "case3": [0.10, 0.15, 0.20, 0.25, 0.30],   # latent AR matrix shift
     "case4": [0.10, 0.20, 0.30, 0.40, 0.50],   # latent cov shift (Delta_z[1,2]=[2,1]=d)
     "case5": [0.04, 0.08, 0.12, 0.16, 0.20],   # obs noise cov shift (Sigma_eps[2,5]=[5,2]=d)
 }
@@ -123,3 +123,15 @@ SHIFTS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 SEED = 42
+
+# ─────────────────────────────────────────────────────────────────────────────
+# OC shift locations  (3 per case)
+# ─────────────────────────────────────────────────────────────────────────────
+
+LOCATIONS = {
+    "case1": [0, 1, 2],              # latent dim: z₁, z₂, z₃
+    "case2": [1, 4, 7],              # obs component: x₂, x₅, x₈  (0-indexed)
+    "case3": [(0,1), (1,2), (0,2)],  # AR matrix:  B[0,1], B[1,2], B[0,2]
+    "case4": [(0,1), (1,2), (0,2)],  # latent cov: Δz[0,1], Δz[1,2], Δz[0,2]
+    "case5": [(1,6), (2,5), (3,8)],  # noise cov:  Σε[1,6], Σε[2,5], Σε[3,8]
+}

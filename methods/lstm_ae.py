@@ -228,6 +228,61 @@ class LSTMAEMonitor:
         T2_ae = float(n * r_bar @ self.Sig_r_inv @ r_bar)
         return T2_ae
 
+    def monitor_window_batch(self, X_batch: np.ndarray,
+                              sub_batch: int = 8192) -> np.ndarray:
+        """
+        Compute LSTM-AE monitoring statistics for a batch of windows.
+
+        All B×n lag-1 pairs are processed in a single batched LSTM forward
+        pass (sub-batched to avoid OOM), replacing the previous per-window
+        Python loop that was O(B) forward passes.
+
+        Parameters
+        ----------
+        X_batch   : array, shape (B, n+1, p)
+        sub_batch : max pairs per LSTM forward call (default 8192)
+
+        Returns
+        -------
+        stats : array, shape (B, 1)  — Hotelling T² per window
+        """
+        X_batch = np.asarray(X_batch, dtype=np.float32)
+        if X_batch.ndim != 3:
+            raise ValueError(
+                f"X_batch must have shape (B, n+1, p), got {X_batch.shape}"
+            )
+        B, n1, p = X_batch.shape
+        n = n1 - 1  # observations per window
+
+        # Build all B×n lag-1 pairs at once: (B*n, 2, p)
+        pairs = np.stack([X_batch[:, :-1, :],   # x_{t-1}
+                          X_batch[:,  1:, :]], axis=2)   # x_t
+        pairs_flat = pairs.reshape(B * n, 2, p)  # (B*n, 2, p)
+
+        # Batched LSTM forward pass (sub-batched to avoid OOM on large B).
+        # Always run on CPU: MPS has a known LSTM bug ("Placeholder storage
+        # has not been allocated on MPS device") with large batch sizes.
+        infer_device = torch.device("cpu")
+        self.model.eval()
+        self.model.to(infer_device)
+        residuals = np.empty((B * n, p), dtype=np.float32)
+        for start in range(0, B * n, sub_batch):
+            end  = min(start + sub_batch, B * n)
+            t_in = torch.from_numpy(pairs_flat[start:end])   # already on cpu
+            with torch.no_grad():
+                t_out = self.model(t_in)           # (chunk, 2, p)
+            residuals[start:end] = (
+                t_in[:, 1, :] - t_out[:, 1, :]
+            ).numpy()
+
+        # Reshape → (B, n, p), compute per-window mean residual
+        residuals = residuals.reshape(B, n, p)
+        r_bar = residuals.mean(axis=1) - self.mu_r         # (B, p)
+
+        # Hotelling T²  (vectorised, no loop)
+        T2 = n * np.einsum('bi,ij,bj->b', r_bar, self.Sig_r_inv, r_bar)
+        return T2.reshape(-1, 1)
+
     def monitor_sequence(self, X: np.ndarray, n: int):
         """
         Apply sliding-window monitoring.

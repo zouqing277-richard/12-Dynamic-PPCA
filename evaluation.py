@@ -50,7 +50,7 @@ OC_COMPARISON_STATS: Dict[str, List[Tuple[str, str]]] = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _generate_oc_stats(model_ic, monitors_needed, case, d,
-                        n_window, K_max_crn, B_crn, rng):
+                        n_window, K_max_crn, B_crn, rng, loc=None):
     """
     Pre-generate OC statistics for B_crn sequences × K_max_crn windows,
     for ALL required monitors simultaneously (CRN across methods).
@@ -80,14 +80,14 @@ def _generate_oc_stats(model_ic, monitors_needed, case, d,
     for name, mon in monitors_needed.items():
         X_test, _ = simulate_oc_batch_stateful(model_ic, n_window, case, d,
                                                 Z[:2].copy(),
-                                                np.random.default_rng(99))
+                                                np.random.default_rng(99), loc=loc)
         Xw_test = np.concatenate([x_lag[:2], X_test], axis=1)
         d_stats = mon.monitor_window_batch(Xw_test).shape[1]
         oc_stats[name] = np.empty((B_crn, K_max_crn, d_stats))
 
     # Generate K_max_crn windows for all B sequences simultaneously
     for k in range(K_max_crn):
-        X_new, Z = simulate_oc_batch_stateful(model_ic, n_window, case, d, Z, rng)
+        X_new, Z = simulate_oc_batch_stateful(model_ic, n_window, case, d, Z, rng, loc=loc)
         X_win    = np.concatenate([x_lag, X_new], axis=1)   # (B, n+1, p)
         for name, mon in monitors_needed.items():
             oc_stats[name][:, k, :] = mon.monitor_window_batch(X_win)
@@ -120,7 +120,7 @@ def _arl_from_stats(stats_col, h):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_arl_experiment_crn(case, d, monitors, ucls, model_ic,
-                            n_window, K_max_crn, B_crn, rng):
+                            n_window, K_max_crn, B_crn, rng, loc=None):
     """
     Compute ARL₁ for all relevant (method, statistic) pairs using CRN.
 
@@ -142,7 +142,7 @@ def run_arl_experiment_crn(case, d, monitors, ucls, model_ic,
 
     oc_stats = _generate_oc_stats(
         model_ic, methods_needed, case, d,
-        n_window, K_max_crn, B_crn, rng)
+        n_window, K_max_crn, B_crn, rng, loc=loc)
 
     results = {}
     for method, stat_name in pairs:
