@@ -67,17 +67,17 @@ N_TRAIN = 2000
 # Phase II
 # ─────────────────────────────────────────────────────────────────────────────
 
-N_WINDOW = 100      # window size n; 
+N_WINDOW = 50      # window size n;  n/(p−q) = 50/7 ≈ 7.1
 ARL0     = 200
-K_MAX    = 1000
+K_MAX    = 2000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Calibration  (two-phase MC bisection on ARL₀)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── CRN calibration parameters ──────────────────────────────────────────────
-B_CRN       = 10_000     # IC sequences per method (CRN reduces variance vs old B_FINE)
-K_MAX_CRN   =  1000    # windows per sequence  (P(RL>1000) ≈ 0.1% → negligible censoring)
+B_CRN       = 5_000     # IC sequences per method (CRN reduces variance vs old B_FINE)
+K_MAX_CRN   = 1_500     # windows per sequence  (P(RL>1500) ≈ 0.1% → negligible censoring)
 N_COARSE    = 20        # binary search steps in coarse phase
 BISECT_TOL  = 2.0       # stop when |ARL₀(h) − 200| ≤ 2
 MAX_FINE    = 60        # safety cap
@@ -114,8 +114,8 @@ LSTM_PATIENCE   = 10
 
 SHIFTS = {
     "case1": [0.2,  0.4,  0.6,  0.8,  1.0 ],   # latent mean shift
-    "case2": [0.1,  0.2,  0.3,  0.4,  0.5 ],   # obs mean shift (general direction)
-    "case3": [0.10, 0.15, 0.20, 0.25, 0.30],   # latent AR matrix shift
+    "case2": [0.3,  0.35, 0.4,  0.5,  0.6 ],   # obs mean shift (general direction)
+    "case3": [0.10, 0.15, 0.20, 0.25, 0.35],   # latent AR matrix shift
     "case4": [0.10, 0.20, 0.30, 0.40, 0.50],   # latent cov shift (Delta_z[1,2]=[2,1]=d)
     "case5": [0.04, 0.08, 0.12, 0.16, 0.20],   # obs noise cov shift (Sigma_eps[2,5]=[5,2]=d)
 }
@@ -123,6 +123,20 @@ SHIFTS = {
 # ─────────────────────────────────────────────────────────────────────────────
 
 SEED = 42
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnostic experiment shift magnitudes  (Section 5.4)
+# Independent from ARL experiment — focus on moderate-to-large shifts
+# so that t_total has sufficient detection power before diagnosing.
+# ─────────────────────────────────────────────────────────────────────────────
+
+DIAG_SHIFTS = {
+    "case1": [0.5, 0.6, 0.7, 0.8, 0.9],
+    "case2": [0.35, 0.4, 0.45, 0.5, 0.6],
+    "case3": [0.52, 0.55, 0.58, 0.62, 0.66],
+    "case4": [0.5, 0.6, 0.7, 0.8, 0.9],
+    "case5": [0.05, 0.09, 0.13, 0.17, 0.21],
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # OC shift locations  (3 per case)
